@@ -1,0 +1,854 @@
+/**
+ * app.js
+ *
+ * UI wiring for Timestamp Camera Web.
+ *
+ * Flow:
+ * 1. User picks / captures a photo.
+ * 2. GPS in the photo's EXIF becomes the stamp location (lat/lon), and the location is
+ *    reverse geocoded online (Google if a key is configured, otherwise OpenStreetMap)
+ *    into "อ.<อำเภอ>, จ.<จังหวัด>".
+ * 3. No GPS in the photo → keep the previous location and offer: device GPS, saved
+ *    locations, map, or a pasted Google Maps link.
+ * 4. Date/time is always chosen by the user (live clock, or any past/future value).
+ * 5. Export renders the full-resolution JPEG, then a result sheet offers Share/Save
+ *    (fresh tap keeps iOS Web Share happy) and a direct download.
+ */
+
+import {
+  getState,
+  subscribe,
+  setImage,
+  setCustomDateTime,
+  setLiveTime,
+  tickLiveTime,
+  updateCoordinates,
+  setAddress,
+  setManualAddress,
+  unlockAddress,
+  updateState,
+  resetDefaults
+} from './state.js';
+
+import { formatThaiBuddhistDate, toValidDate } from './thai-datetime.js';
+import { formatCoordinates, formatSignedComponent, isValidCoordinate, parseLocationInput, isShortMapUrl } from './coordinates.js';
+import { resolveThaiAddress } from './geocoder.js';
+import { getDefaultPresets, getCustomPresets, saveCustomPreset, deleteCustomPreset, PRESET_SLOT_COUNT } from './presets.js';
+import { parseExif } from './exif-parser.js';
+import { loadWatermarkFonts } from './font-loader.js';
+import { renderPreview, renderWatermark, exportFullResolution } from './watermark-engine.js';
+import { generateExportFilename, canUseWebShare, shareFile, downloadBlob } from './export-manager.js';
+import { initMap, setMapCoordinates } from './map-picker.js';
+
+const LAST_LOCATION_KEY = 'tc_last_location';
+
+const SOURCE_LABELS = {
+  default: { text: 'ค่าเริ่มต้น', tone: '' },
+  last: { text: 'ใช้ล่าสุด', tone: '' },
+  exif: { text: 'จากรูปภาพ', tone: 'is-ok' },
+  gps: { text: 'GPS เครื่องนี้', tone: 'is-ok' },
+  map: { text: 'เลือกบนแผนที่', tone: 'is-accent' },
+  preset: { text: 'พิกัดที่บันทึกไว้', tone: 'is-accent' },
+  link: { text: 'จากลิงก์/ข้อความ', tone: 'is-accent' },
+  manual: { text: 'พิมพ์เอง', tone: 'is-accent' }
+};
+
+const PROVIDER_LABELS = {
+  google: 'Google',
+  nominatim: 'OpenStreetMap'
+};
+
+let el = {};
+let clockInterval = null;
+let repaintRequest = null;
+let addressToken = 0;
+let exportBlob = null;
+let exportUrl = null;
+let exportFilename = '';
+
+// ---------------------------------------------------------------------------
+// DOM
+// ---------------------------------------------------------------------------
+
+export function queryDOMElements() {
+  if (typeof document === 'undefined') return {};
+  const $ = (id) => document.getElementById(id);
+  return {
+    canvas: $('preview-canvas'),
+    placeholder: $('viewfinder-placeholder'),
+    banner: $('gps-banner'),
+    bannerText: $('gps-banner-text'),
+    bannerActions: $('gps-banner-actions'),
+
+    fileInput: $('file-input'),
+    cameraInput: $('camera-input'),
+    albumBtn: $('btn-album'),
+    cameraBtn: $('btn-camera'),
+    replaceBtn: $('btn-replace-image'),
+    resetAllBtn: $('btn-reset-all'),
+
+    datetimeOutput: $('datetime-output'),
+    liveToggle: $('live-time-toggle'),
+    datetimeInput: $('datetime-input'),
+    secondsInput: $('seconds-input'),
+    exifTimeBtn: $('btn-exif-time'),
+
+    coordsSource: $('coords-source'),
+    presetsBtn: $('btn-presets'),
+    gpsBtn: $('btn-quick-gps'),
+    latInput: $('lat-input'),
+    lonInput: $('lon-input'),
+    mapLinkInput: $('map-link-input'),
+    parseLinkBtn: $('btn-parse-link'),
+    googleLink: $('link-google-maps'),
+
+    addressInput: $('address-input'),
+    addressStatus: $('address-status'),
+    resetAddressBtn: $('btn-reset-address'),
+
+    exportBtn: $('btn-export'),
+
+    presetsSheet: $('presets-sheet'),
+    presetsList: $('presets-list'),
+    presetsEmpty: $('presets-empty'),
+    savePresetBtn: $('btn-save-preset'),
+
+    resultSheet: $('result-sheet'),
+    resultImage: $('result-image'),
+    resultHint: $('result-hint'),
+    shareBtn: $('btn-share'),
+    downloadBtn: $('btn-download'),
+
+    toasts: $('toast-container')
+  };
+}
+
+export function showToast(message, duration = 3200) {
+  if (!el.toasts) return;
+  const toast = document.createElement('div');
+  toast.className = 'toast';
+  toast.textContent = message;
+  el.toasts.appendChild(toast);
+  setTimeout(() => {
+    toast.classList.add('is-leaving');
+    setTimeout(() => toast.remove(), 300);
+  }, duration);
+}
+
+function setTag(node, text, tone = '') {
+  if (!node) return;
+  node.textContent = text;
+  node.className = `tag ${tone}`.trim();
+}
+
+function openSheet(dialog) {
+  if (!dialog) return;
+  if (typeof dialog.showModal === 'function') dialog.showModal();
+  else dialog.setAttribute('open', '');
+}
+
+function closeSheet(dialog) {
+  if (!dialog) return;
+  if (typeof dialog.close === 'function') dialog.close();
+  else dialog.removeAttribute('open');
+}
+
+// ---------------------------------------------------------------------------
+// Canvas
+// ---------------------------------------------------------------------------
+
+function getWatermarkData(state = getState()) {
+  return {
+    dateTimeStr: formatThaiBuddhistDate(state.dateTime),
+    coordsStr: formatCoordinates(state.lat, state.lon),
+    addressStr: state.address
+  };
+}
+
+export function renderPreviewCanvas() {
+  const canvas = el.canvas;
+  if (!canvas) return;
+  const state = getState();
+  const data = getWatermarkData(state);
+
+  if (state.image) {
+    // Decoded images are already upright (createImageBitmap from-image / browser auto-orient)
+    renderPreview(canvas, state.image, data, { orientation: 1 });
+    return;
+  }
+
+  // No photo yet: draw a neutral frame so the stamp layout is visible
+  if (canvas.width !== 1280 || canvas.height !== 960) {
+    canvas.width = 1280;
+    canvas.height = 960;
+  }
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+  const grad = ctx.createLinearGradient(0, 0, 0, canvas.height);
+  grad.addColorStop(0, '#1b1f27');
+  grad.addColorStop(1, '#0c0e12');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  renderWatermark(ctx, canvas.width, canvas.height, data);
+}
+
+export function scheduleRepaint() {
+  if (repaintRequest !== null) return;
+  if (typeof requestAnimationFrame !== 'function') {
+    renderPreviewCanvas();
+    return;
+  }
+  repaintRequest = requestAnimationFrame(() => {
+    repaintRequest = null;
+    renderPreviewCanvas();
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Date & time
+// ---------------------------------------------------------------------------
+
+function toMinuteLocalString(d) {
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function syncDateTimeControls(state) {
+  const d = state.dateTime;
+  if (el.datetimeOutput) el.datetimeOutput.textContent = formatThaiBuddhistDate(d);
+  // Don't fight the user while they're typing into a field
+  if (el.datetimeInput && document.activeElement !== el.datetimeInput) {
+    el.datetimeInput.value = toMinuteLocalString(d);
+  }
+  if (el.secondsInput && document.activeElement !== el.secondsInput) {
+    el.secondsInput.value = String(d.getSeconds()).padStart(2, '0');
+  }
+}
+
+function applyCustomDateTimeFromInputs() {
+  const value = el.datetimeInput?.value || '';
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
+  if (!match) return;
+  let seconds = parseInt(el.secondsInput?.value, 10);
+  if (!Number.isFinite(seconds)) seconds = getState().dateTime.getSeconds();
+  seconds = Math.min(59, Math.max(0, seconds));
+  const [, y, mo, d, h, mi] = match.map(Number);
+  const next = new Date(y, mo - 1, d, h, mi, seconds);
+  if (!Number.isNaN(next.getTime())) setCustomDateTime(next);
+}
+
+function shiftDateTime({ days = 0, minutes = 0 }) {
+  const base = new Date(getState().dateTime.getTime());
+  if (days) base.setDate(base.getDate() + days);
+  if (minutes) base.setMinutes(base.getMinutes() + minutes);
+  setCustomDateTime(base);
+}
+
+export function startClock() {
+  if (clockInterval) clearInterval(clockInterval);
+  clockInterval = setInterval(() => {
+    if (getState().isLiveTime) tickLiveTime(new Date());
+  }, 1000);
+}
+
+export function stopClock() {
+  if (clockInterval) clearInterval(clockInterval);
+  clockInterval = null;
+}
+
+// ---------------------------------------------------------------------------
+// Location & address
+// ---------------------------------------------------------------------------
+
+function rememberLocation() {
+  const { lat, lon, address } = getState();
+  try {
+    localStorage.setItem(LAST_LOCATION_KEY, JSON.stringify({ lat, lon, address }));
+  } catch {
+    // Storage unavailable (private mode) — not critical
+  }
+}
+
+function loadRememberedLocation() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(LAST_LOCATION_KEY) || 'null');
+    if (saved && isValidCoordinate(saved.lat, saved.lon)) return saved;
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+function renderCoordsSource(source) {
+  const label = SOURCE_LABELS[source] || SOURCE_LABELS.default;
+  setTag(el.coordsSource, label.text, label.tone);
+}
+
+/**
+ * Re-resolves the address for the current coordinates unless the user typed their own.
+ */
+export function refreshAddress() {
+  const state = getState();
+  if (state.isAddressManual) return;
+
+  const token = ++addressToken;
+  const { lat, lon } = state;
+  let lastSource = 'offline';
+  setTag(el.addressStatus, 'กำลังค้นหา…', '');
+
+  resolveThaiAddress(lat, lon, {
+    isAddressManual: false,
+    onUpdate: (address, meta = {}) => {
+      const now = getState();
+      if (token !== addressToken || now.isAddressManual || now.lat !== lat || now.lon !== lon) return;
+      if (address) setAddress(address, false);
+      lastSource = meta.source || 'offline';
+      if (lastSource !== 'offline') {
+        setTag(el.addressStatus, `จาก ${PROVIDER_LABELS[lastSource] || lastSource}`, 'is-ok');
+        rememberLocation();
+      }
+    }
+  }).then((finalAddress) => {
+    if (token !== addressToken || getState().isAddressManual) return;
+    if (lastSource === 'offline') {
+      if (finalAddress) {
+        setTag(el.addressStatus, 'ประมาณ (ออฟไลน์)', 'is-warn');
+      } else {
+        setTag(el.addressStatus, 'ไม่พบ — พิมพ์เอง', 'is-warn');
+      }
+      rememberLocation();
+    }
+  });
+}
+
+/**
+ * Single entry point for every location change.
+ * @param {number} lat
+ * @param {number} lon
+ * @param {keyof SOURCE_LABELS} source
+ * @param {{ zoom?: boolean, address?: string }} [opts]
+ */
+export function setLocation(lat, lon, source, opts = {}) {
+  if (!isValidCoordinate(lat, lon)) return false;
+
+  const hasPresetAddress = typeof opts.address === 'string' && opts.address.trim() !== '';
+  if (hasPresetAddress || source === 'exif') {
+    unlockAddress();
+  }
+
+  updateCoordinates(lat, lon, { skipAddressUpdate: hasPresetAddress });
+  const state = getState();
+  setMapCoordinates(state.lat, state.lon, opts.zoom !== false, { silent: true });
+  renderCoordsSource(source);
+
+  if (hasPresetAddress) {
+    addressToken++;
+    setAddress(opts.address, false);
+    setTag(el.addressStatus, 'จากพิกัดที่บันทึกไว้', 'is-accent');
+    rememberLocation();
+  } else {
+    refreshAddress();
+  }
+  return true;
+}
+
+function requestDeviceLocation({ quiet = false } = {}) {
+  if (!navigator.geolocation) {
+    showToast('เบราว์เซอร์นี้ไม่รองรับ GPS');
+    return;
+  }
+  el.gpsBtn?.classList.add('is-busy');
+  if (!quiet) showToast('กำลังหาตำแหน่ง GPS…', 2000);
+  navigator.geolocation.getCurrentPosition(
+    (pos) => {
+      el.gpsBtn?.classList.remove('is-busy');
+      setLocation(pos.coords.latitude, pos.coords.longitude, 'gps');
+      showToast(`ได้พิกัด GPS (แม่นยำ ±${Math.round(pos.coords.accuracy)} ม.)`);
+    },
+    (err) => {
+      el.gpsBtn?.classList.remove('is-busy');
+      const reason = err.code === 1
+        ? 'ไม่ได้อนุญาตให้เข้าถึงตำแหน่ง (เปิดในการตั้งค่าเบราว์เซอร์)'
+        : 'หาตำแหน่งไม่สำเร็จ ลองอีกครั้งในที่โล่ง';
+      showToast(reason, 4500);
+    },
+    { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
+  );
+}
+
+function applyLocationText(text, source) {
+  const value = (text || '').trim();
+  if (!value) return false;
+  const coords = parseLocationInput(value);
+  if (coords) {
+    setLocation(coords.lat, coords.lon, source);
+    return true;
+  }
+  if (isShortMapUrl(value)) {
+    showToast('ลิงก์ย่อ (maps.app.goo.gl) อ่านพิกัดไม่ได้ — เปิดลิงก์ใน Google Maps แล้วคัดลอกตัวเลขพิกัดมาวางแทน', 6000);
+  } else {
+    showToast('อ่านพิกัดไม่ได้ ใช้รูปแบบ 6.499413, 101.267206');
+  }
+  return false;
+}
+
+function syncLocationControls(state, changedKeys) {
+  if (changedKeys.includes('lat') && el.latInput && document.activeElement !== el.latInput) {
+    el.latInput.value = formatSignedComponent(state.lat);
+    el.latInput.classList.remove('is-invalid');
+  }
+  if (changedKeys.includes('lon') && el.lonInput && document.activeElement !== el.lonInput) {
+    el.lonInput.value = formatSignedComponent(state.lon);
+    el.lonInput.classList.remove('is-invalid');
+  }
+  if (el.googleLink) {
+    el.googleLink.href = `https://www.google.com/maps/search/?api=1&query=${state.lat},${state.lon}`;
+  }
+}
+
+function syncAddressControls(state, changedKeys) {
+  if (changedKeys.includes('address') && el.addressInput && document.activeElement !== el.addressInput) {
+    el.addressInput.value = state.address;
+  }
+  if (changedKeys.includes('isAddressManual')) {
+    if (el.resetAddressBtn) el.resetAddressBtn.hidden = !state.isAddressManual;
+    if (state.isAddressManual) setTag(el.addressStatus, 'แก้ไขเอง', 'is-accent');
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Banner (GPS-from-photo status)
+// ---------------------------------------------------------------------------
+
+function showBanner(tone, text, actions = []) {
+  if (!el.banner) return;
+  el.banner.hidden = false;
+  el.banner.className = `banner ${tone}`.trim();
+  el.bannerText.textContent = text;
+  el.bannerActions.innerHTML = '';
+  for (const action of actions) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn btn-secondary btn-sm';
+    btn.textContent = action.label;
+    btn.addEventListener('click', action.onClick);
+    el.bannerActions.appendChild(btn);
+  }
+}
+
+function hideBanner() {
+  if (el.banner) el.banner.hidden = true;
+}
+
+// ---------------------------------------------------------------------------
+// Photo loading
+// ---------------------------------------------------------------------------
+
+function loadImageElement(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+    img.onerror = (err) => { URL.revokeObjectURL(url); reject(err); };
+    img.src = url;
+  });
+}
+
+async function decodeImage(file) {
+  if (typeof createImageBitmap === 'function') {
+    try {
+      return await createImageBitmap(file, { imageOrientation: 'from-image' });
+    } catch {
+      // Fall through to <img> decoding (older Safari)
+    }
+  }
+  return loadImageElement(file);
+}
+
+/**
+ * @param {File} file
+ * @param {{ fromCamera?: boolean }} [opts]
+ */
+export async function handleImageFile(file, opts = {}) {
+  if (!file) return;
+
+  const [exifResult, imageResult] = await Promise.allSettled([parseExif(file), decodeImage(file)]);
+
+  if (imageResult.status !== 'fulfilled') {
+    const isHeic = /heic|heif/i.test(file.type) || /\.(heic|heif)$/i.test(file.name || '');
+    showToast(isHeic
+      ? 'เบราว์เซอร์นี้เปิดไฟล์ HEIC ไม่ได้ — เปิดเว็บนี้บน iPhone (Safari) หรือแปลงรูปเป็น JPG ก่อน'
+      : 'เปิดไฟล์รูปนี้ไม่ได้', 6000);
+    return;
+  }
+
+  const exif = exifResult.status === 'fulfilled' ? exifResult.value : null;
+  setImage(imageResult.value, file, file.name || 'photo.jpg');
+
+  const exifDate = toValidDate(exif?.dateTime);
+  updateState({
+    exifData: exif?.hasExif ? {
+      orientation: 1,
+      dateTime: exifDate,
+      latitude: exif.latitude ?? null,
+      longitude: exif.longitude ?? null,
+      altitude: exif.altitude ?? null
+    } : null
+  });
+  if (el.exifTimeBtn) el.exifTimeBtn.hidden = !exifDate;
+
+  const hasGps = typeof exif?.latitude === 'number' && typeof exif?.longitude === 'number' &&
+    isValidCoordinate(exif.latitude, exif.longitude) && !(exif.latitude === 0 && exif.longitude === 0);
+  updateState({ hasExifGps: hasGps });
+
+  if (hasGps) {
+    setLocation(exif.latitude, exif.longitude, 'exif');
+    const now = getState();
+    showBanner('is-ok', `ใช้พิกัดจากรูป: ${formatCoordinates(now.lat, now.lon)} · ${now.address}`);
+    // Banner text follows the address lookup
+    const token = addressToken;
+    const unsub = subscribe((state, keys) => {
+      if (token !== addressToken) { unsub(); return; }
+      if (keys.includes('address')) {
+        el.bannerText.textContent = `ใช้พิกัดจากรูป: ${formatCoordinates(state.lat, state.lon)} · ${state.address}`;
+      }
+    });
+    return;
+  }
+
+  if (opts.fromCamera) {
+    showBanner('is-warn', 'รูปจากกล้องเว็บไม่มีพิกัดแนบมา กำลังใช้ GPS ของเครื่องแทน…');
+    requestDeviceLocation({ quiet: true });
+    return;
+  }
+
+  showBanner(
+    'is-warn',
+    'รูปนี้ไม่มีพิกัด GPS (หรือถูกตัดออกตอนเลือกรูป) — ตอนนี้ใช้พิกัดเดิมอยู่ เลือกพิกัดใหม่ได้จากปุ่มด้านล่างหรือแผนที่ · เคล็ดลับ: เลือกรูปผ่าน "ไฟล์/Files" แทน "คลังรูปภาพ" มักได้พิกัดครบกว่า',
+    [
+      { label: 'GPS เครื่องนี้', onClick: () => requestDeviceLocation() },
+      { label: 'พิกัดที่บันทึกไว้', onClick: () => openPresetsSheet() }
+    ]
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Saved locations (presets)
+// ---------------------------------------------------------------------------
+
+export function renderPresetList() {
+  if (!el.presetsList) return;
+  // Built-in presets first (slot 1...), then the user's own; pad with empty slots up to PRESET_SLOT_COUNT
+  const presets = [...getDefaultPresets(), ...getCustomPresets()];
+  el.presetsList.innerHTML = '';
+  if (el.presetsEmpty) el.presetsEmpty.hidden = true;
+
+  const slotTotal = Math.max(PRESET_SLOT_COUNT, presets.length);
+  for (let slot = 1; slot <= slotTotal; slot++) {
+    const preset = presets[slot - 1];
+    if (!preset) {
+      el.presetsList.appendChild(createEmptyPresetSlot(slot));
+      continue;
+    }
+
+    const li = document.createElement('li');
+    li.className = 'preset-item';
+
+    const num = document.createElement('span');
+    num.className = 'preset-num';
+    num.textContent = String(slot);
+    li.appendChild(num);
+
+    const pick = document.createElement('button');
+    pick.type = 'button';
+    pick.className = 'preset-pick';
+    const name = document.createElement('span');
+    name.className = 'preset-name';
+    name.textContent = preset.name;
+    const meta = document.createElement('span');
+    meta.className = 'preset-meta mono';
+    meta.textContent = `${formatCoordinates(preset.lat, preset.lon)}${preset.address ? ` · ${preset.address}` : ''}`;
+    pick.append(name, meta);
+    pick.addEventListener('click', () => {
+      setLocation(preset.lat, preset.lon, 'preset', { address: preset.address });
+      updateState({ selectedPresetId: preset.id });
+      closeSheet(el.presetsSheet);
+    });
+    li.appendChild(pick);
+
+    if (!preset.isDefault) {
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'preset-delete';
+      del.setAttribute('aria-label', `ลบ ${preset.name}`);
+      del.textContent = '✕';
+      del.addEventListener('click', () => {
+        if (confirm(`ลบ "${preset.name}" ?`)) {
+          deleteCustomPreset(preset.id);
+          renderPresetList();
+        }
+      });
+      li.appendChild(del);
+    }
+
+    el.presetsList.appendChild(li);
+  }
+}
+
+function createEmptyPresetSlot(slot) {
+  const li = document.createElement('li');
+  li.className = 'preset-item is-empty';
+
+  const num = document.createElement('span');
+  num.className = 'preset-num';
+  num.textContent = String(slot);
+
+  const label = document.createElement('span');
+  label.className = 'preset-empty-label';
+  label.textContent = 'ว่าง — ยังไม่มีพิกัด';
+
+  const save = document.createElement('button');
+  save.type = 'button';
+  save.className = 'btn btn-ghost btn-sm';
+  save.textContent = 'บันทึกที่นี่';
+  save.title = 'บันทึกพิกัดปัจจุบันลงช่องนี้';
+  save.addEventListener('click', saveCurrentAsPreset);
+
+  li.append(num, label, save);
+  return li;
+}
+
+function openPresetsSheet() {
+  renderPresetList();
+  openSheet(el.presetsSheet);
+}
+
+function saveCurrentAsPreset() {
+  const state = getState();
+  const name = prompt('ตั้งชื่อพิกัดนี้', state.address || 'จุดบันทึก');
+  if (!name || !name.trim()) return;
+  const saved = saveCustomPreset({ name: name.trim(), lat: state.lat, lon: state.lon, address: state.address });
+  if (saved) {
+    renderPresetList();
+    showToast(`บันทึก "${saved.name}" แล้ว`);
+  } else {
+    showToast('บันทึกไม่สำเร็จ (ชื่อยาวเกิน 100 ตัวอักษร?)');
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Export
+// ---------------------------------------------------------------------------
+
+async function runExport() {
+  const state = getState();
+  if (!state.image) {
+    el.fileInput?.click();
+    return;
+  }
+
+  el.exportBtn.classList.add('is-busy');
+  el.exportBtn.textContent = 'กำลังสร้างภาพ…';
+  try {
+    exportBlob = await exportFullResolution(state.image, getWatermarkData(state), {
+      orientation: 1,
+      quality: 0.92,
+      mimeType: 'image/jpeg'
+    });
+    exportFilename = generateExportFilename('', state.dateTime);
+    if (exportUrl) URL.revokeObjectURL(exportUrl);
+    exportUrl = URL.createObjectURL(exportBlob);
+
+    el.resultImage.src = exportUrl;
+    el.downloadBtn.href = exportUrl;
+    el.downloadBtn.download = exportFilename;
+
+    const file = new File([exportBlob], exportFilename, { type: 'image/jpeg' });
+    const shareable = canUseWebShare(file);
+    el.shareBtn.hidden = !shareable;
+    el.resultHint.textContent = shareable
+      ? 'กด "แชร์ / บันทึกลงอัลบั้ม" แล้วเลือกบันทึกภาพ · หรือกดค้างที่รูป'
+      : 'กด "ดาวน์โหลดไฟล์" เพื่อบันทึกภาพ';
+    openSheet(el.resultSheet);
+  } catch (err) {
+    console.error('[App] Export failed:', err);
+    showToast('สร้างภาพไม่สำเร็จ: ' + (err?.message || err), 5000);
+  } finally {
+    el.exportBtn.classList.remove('is-busy');
+    el.exportBtn.textContent = 'บันทึกภาพ';
+  }
+}
+
+async function shareExport() {
+  if (!exportBlob) return;
+  const file = new File([exportBlob], exportFilename, { type: 'image/jpeg' });
+  try {
+    await shareFile(file, exportFilename);
+  } catch (err) {
+    console.warn('[App] Share failed, downloading instead:', err);
+    downloadBlob(exportBlob, exportFilename);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Wiring
+// ---------------------------------------------------------------------------
+
+export function setupStateSubscription() {
+  subscribe((state, changedKeys) => {
+    if (changedKeys.some(k => ['image', 'dateTime', 'lat', 'lon', 'address'].includes(k))) {
+      scheduleRepaint();
+    }
+    if (changedKeys.includes('image') && el.placeholder) {
+      el.placeholder.hidden = !!state.image;
+    }
+    if (changedKeys.includes('dateTime')) syncDateTimeControls(state);
+    if (changedKeys.includes('isLiveTime') && el.liveToggle) el.liveToggle.checked = state.isLiveTime;
+    if (changedKeys.some(k => k === 'lat' || k === 'lon')) syncLocationControls(state, changedKeys);
+    syncAddressControls(state, changedKeys);
+  });
+}
+
+export function setupEventListeners() {
+  if (typeof document === 'undefined') return;
+
+  // Photo inputs
+  el.fileInput?.addEventListener('change', (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (file) handleImageFile(file);
+  });
+  el.cameraInput?.addEventListener('change', (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (file) handleImageFile(file, { fromCamera: true });
+  });
+  el.albumBtn?.addEventListener('click', () => el.fileInput?.click());
+  el.replaceBtn?.addEventListener('click', () => el.fileInput?.click());
+  el.cameraBtn?.addEventListener('click', () => el.cameraInput?.click());
+
+  // Date & time
+  el.liveToggle?.addEventListener('change', (e) => setLiveTime(e.target.checked));
+  el.datetimeInput?.addEventListener('change', applyCustomDateTimeFromInputs);
+  el.secondsInput?.addEventListener('change', applyCustomDateTimeFromInputs);
+  document.querySelectorAll('[data-shift-days], [data-shift-minutes]').forEach((chip) => {
+    chip.addEventListener('click', () => shiftDateTime({
+      days: Number(chip.dataset.shiftDays || 0),
+      minutes: Number(chip.dataset.shiftMinutes || 0)
+    }));
+  });
+  el.exifTimeBtn?.addEventListener('click', () => {
+    const d = getState().exifData?.dateTime;
+    if (d) setCustomDateTime(d);
+  });
+
+  // Coordinates
+  const onCoordInput = () => {
+    // Allow pasting "lat, lon" into either box
+    const latText = el.latInput.value.trim();
+    if (latText.includes(',') && applyLocationText(latText, 'manual')) return;
+    const lat = parseFloat(latText);
+    const lon = parseFloat(el.lonInput.value.trim());
+    const ok = isValidCoordinate(lat, lon);
+    el.latInput.classList.toggle('is-invalid', !ok);
+    el.lonInput.classList.toggle('is-invalid', !ok);
+    if (ok) setLocation(lat, lon, 'manual');
+  };
+  el.latInput?.addEventListener('change', onCoordInput);
+  el.lonInput?.addEventListener('change', onCoordInput);
+
+  const onLinkSubmit = () => {
+    if (applyLocationText(el.mapLinkInput.value, 'link')) el.mapLinkInput.value = '';
+  };
+  el.parseLinkBtn?.addEventListener('click', onLinkSubmit);
+  el.mapLinkInput?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); onLinkSubmit(); }
+  });
+  el.mapLinkInput?.addEventListener('paste', () => setTimeout(onLinkSubmit, 50));
+
+  el.gpsBtn?.addEventListener('click', () => requestDeviceLocation());
+  el.presetsBtn?.addEventListener('click', openPresetsSheet);
+  el.savePresetBtn?.addEventListener('click', saveCurrentAsPreset);
+
+  // Address
+  el.addressInput?.addEventListener('input', (e) => {
+    addressToken++;
+    setManualAddress(e.target.value);
+  });
+  el.resetAddressBtn?.addEventListener('click', () => {
+    unlockAddress();
+    refreshAddress();
+  });
+
+  // Export
+  el.exportBtn?.addEventListener('click', runExport);
+  el.shareBtn?.addEventListener('click', shareExport);
+
+  // Sheets: close button + tap on backdrop
+  document.querySelectorAll('dialog.sheet').forEach((dialog) => {
+    dialog.querySelector('[data-close]')?.addEventListener('click', () => closeSheet(dialog));
+    dialog.addEventListener('click', (e) => {
+      if (e.target === dialog) closeSheet(dialog);
+    });
+  });
+
+  // Reset all
+  el.resetAllBtn?.addEventListener('click', () => {
+    if (getState().image && !confirm('ล้างรูปและค่าทั้งหมด?')) return;
+    resetDefaults();
+    hideBanner();
+    if (el.exifTimeBtn) el.exifTimeBtn.hidden = true;
+    const state = getState();
+    setLocation(state.lat, state.lon, 'default');
+  });
+}
+
+export async function init() {
+  if (typeof document === 'undefined') return;
+
+  el = queryDOMElements();
+
+  loadWatermarkFonts().then(scheduleRepaint);
+
+  setupStateSubscription();
+  setupEventListeners();
+
+  // Start from the last used location (falls back to the built-in default)
+  const remembered = loadRememberedLocation();
+  if (remembered) {
+    updateCoordinates(remembered.lat, remembered.lon, { skipAddressUpdate: true });
+    if (remembered.address) setAddress(remembered.address, false);
+  }
+
+  const state = getState();
+  syncDateTimeControls(state);
+  syncLocationControls(state, ['lat', 'lon']);
+  syncAddressControls(state, ['address', 'isAddressManual']);
+  renderCoordsSource(remembered ? 'last' : 'default');
+  if (el.placeholder) el.placeholder.hidden = !!state.image;
+
+  if (document.getElementById('map')) {
+    initMap('map', { lat: state.lat, lon: state.lon, zoom: 15 }, ({ lat, lon, source }) => {
+      if (source === 'marker_drag' || source === 'map_click') {
+        setLocation(lat, lon, 'map', { zoom: false });
+      }
+    });
+  }
+
+  if (remembered?.address) {
+    setTag(el.addressStatus, 'ใช้ล่าสุด', '');
+  } else {
+    refreshAddress();
+  }
+
+  startClock();
+  scheduleRepaint();
+}
+
+if (typeof document !== 'undefined') {
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => init());
+  } else {
+    init();
+  }
+}

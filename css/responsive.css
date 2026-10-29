@@ -1,0 +1,78 @@
+/* responsive.css — phone first; two columns on wide screens */
+
+@media (max-width: 768px) {
+  .layout {
+    padding: var(--s-3);
+    gap: var(--s-3);
+  }
+
+  .card {
+    padding: var(--s-4) var(--s-3);
+  }
+
+  .preview-canvas {
+    max-height: 56vh;
+  }
+
+  .viewfinder {
+    min-height: 240px;
+  }
+
+  /* Home-indicator clearance for the fixed action bar and bottom sheets */
+  .actionbar {
+    padding-bottom: calc(var(--s-3) + env(safe-area-inset-bottom));
+  }
+
+  .sheet {
+    padding-bottom: calc(var(--s-4) + env(safe-area-inset-bottom));
+  }
+}
+
+@media (max-width: 360px) {
+  .field-row {
+    flex-wrap: wrap;
+  }
+
+  .field.seconds {
+    width: 100%;
+  }
+
+  .btn {
+    padding: 0 var(--s-3);
+  }
+}
+
+@media (min-width: 960px) {
+  .layout {
+    grid-template-columns: minmax(0, 1fr) 420px;
+    align-items: start;
+    gap: var(--s-6);
+    padding: var(--s-6);
+  }
+
+  .stage {
+    position: sticky;
+    top: calc(60px + var(--s-6));
+  }
+
+  .preview-canvas {
+    max-height: calc(100vh - 220px);
+  }
+
+  .actionbar {
+    justify-content: flex-end;
+    padding-left: var(--s-6);
+    padding-right: var(--s-6);
+  }
+
+  .actionbar .btn.grow {
+    flex: 0 0 auto;
+    min-width: 240px;
+  }
+
+  .sheet {
+    margin: auto;
+    border-radius: var(--r-md);
+    padding-bottom: var(--s-4);
+  }
+}
