@@ -324,6 +324,82 @@ export async function fetchOnlineAddress(lat, lon, signal) {
 }
 
 /**
+ * Place-name search: Google Geocoding when a key is configured, otherwise Nominatim
+ * (Thailand first, then worldwide). Only call on an explicit search — Nominatim allows
+ * at most 1 request/second and no search-as-you-type.
+ *
+ * @param {string} query
+ * @param {{ limit?: number, signal?: AbortSignal }} [options]
+ * @returns {Promise<Array<{ name: string, detail: string, lat: number, lon: number }>>}
+ */
+export async function searchPlaces(query, options = {}) {
+  const q = String(query || '').trim();
+  const limit = options.limit || 6;
+  if (!q) return [];
+
+  if (GOOGLE_GEOCODING_API_KEY) {
+    const google = await searchGooglePlaces(q, GOOGLE_GEOCODING_API_KEY, options.signal);
+    if (google.length || options.signal?.aborted) return google.slice(0, limit);
+  }
+  const thai = await searchNominatimPlaces(q, limit, options.signal, 'th');
+  if (thai.length || options.signal?.aborted) return thai;
+  return searchNominatimPlaces(q, limit, options.signal);
+}
+
+async function searchGooglePlaces(query, apiKey, signal) {
+  try {
+    const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(query)}&region=th&language=th&key=${encodeURIComponent(apiKey)}`;
+    const response = await fetch(url, { signal });
+    if (!response.ok) return [];
+    const data = await response.json();
+    if (data.status !== 'OK') return [];
+    return data.results.map((r) => ({
+      name: String(r.formatted_address || '').split(',')[0],
+      detail: parseGoogleGeocodeResults([r]) || r.formatted_address || '',
+      lat: Number(r.geometry?.location?.lat),
+      lon: Number(r.geometry?.location?.lng)
+    })).filter(p => Number.isFinite(p.lat) && Number.isFinite(p.lon));
+  } catch (err) {
+    if (err.name === 'AbortError') throw err;
+    console.warn('Google place search failed:', err.message);
+    return [];
+  }
+}
+
+async function searchNominatimPlaces(query, limit, signal, countryCode = '') {
+  const params = new URLSearchParams({
+    format: 'jsonv2',
+    q: query,
+    limit: String(limit),
+    addressdetails: '1',
+    'accept-language': 'th'
+  });
+  if (countryCode) params.set('countrycodes', countryCode);
+  try {
+    const response = await fetch(`https://nominatim.openstreetmap.org/search?${params}`, {
+      signal,
+      headers: { 'Accept': 'application/json' }
+    });
+    if (!response.ok) return [];
+    const data = await response.json();
+    if (!Array.isArray(data)) return [];
+    return data.map((r) => {
+      const parts = String(r.display_name || '').split(',').map(s => s.trim()).filter(Boolean);
+      return {
+        name: r.name || parts[0] || query,
+        detail: parseNominatimAddress(r.address) || parts.slice(1, 4).join(', '),
+        lat: Number(r.lat),
+        lon: Number(r.lon)
+      };
+    }).filter(p => Number.isFinite(p.lat) && Number.isFinite(p.lon));
+  } catch (err) {
+    if (err.name === 'AbortError') throw err;
+    console.warn('Nominatim search failed:', err.message);
+    return [];
+  }
+}
+
+/**
  * Tier 2 (Nominatim): Fetches reverse geocoded address from OpenStreetMap Nominatim.
  * @returns {Promise<string|null>}
  */

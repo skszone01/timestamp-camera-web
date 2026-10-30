@@ -603,6 +603,14 @@
   background: var(--surface-3);
 }
 
+.place-results {
+  margin-top: var(--s-2);
+}
+
+.place-results .preset-pick {
+  min-height: 48px;
+}
+
 .preset-name,
 .preset-meta {
   overflow: hidden;

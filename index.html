@@ -107,6 +107,16 @@
             <button type="button" id="btn-quick-gps" class="btn btn-secondary">GPS เครื่องนี้</button>
           </div>
 
+          <div class="field">
+            <label for="place-search-input" class="field-label">ค้นหาชื่อสถานที่</label>
+            <form id="place-search-form" class="input-group" role="search">
+              <input type="search" id="place-search-input" class="input" placeholder="เช่น ศาลากลางจังหวัดยะลา" enterkeyhint="search" autocomplete="off" spellcheck="false">
+              <button type="submit" id="btn-place-search" class="btn btn-primary">ค้นหา</button>
+            </form>
+            <p id="place-search-status" class="hint" role="status" hidden></p>
+            <ul id="place-results" class="preset-list place-results" hidden></ul>
+          </div>
+
           <div class="field-row">
             <div class="field grow">
               <label for="lat-input" class="field-label">ละติจูด</label>

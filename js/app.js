@@ -32,7 +32,7 @@ import {
 
 import { formatThaiBuddhistDate, toValidDate } from './thai-datetime.js';
 import { formatCoordinates, formatSignedComponent, isValidCoordinate, parseLocationInput, isShortMapUrl } from './coordinates.js';
-import { resolveThaiAddress } from './geocoder.js';
+import { resolveThaiAddress, searchPlaces } from './geocoder.js';
 import { getDefaultPresets, getCustomPresets, saveCustomPreset, deleteCustomPreset, PRESET_SLOT_COUNT } from './presets.js';
 import { parseExif, readJpegSize } from './exif-parser.js';
 import { loadWatermarkFonts } from './font-loader.js';
@@ -50,6 +50,7 @@ const SOURCE_LABELS = {
   map: { text: 'เลือกบนแผนที่', tone: 'is-accent' },
   preset: { text: 'พิกัดที่บันทึกไว้', tone: 'is-accent' },
   link: { text: 'จากลิงก์/ข้อความ', tone: 'is-accent' },
+  search: { text: 'ค้นหาชื่อสถานที่', tone: 'is-accent' },
   manual: { text: 'พิมพ์เอง', tone: 'is-accent' }
 };
 
@@ -111,6 +112,11 @@ export function queryDOMElements() {
     mapLinkInput: $('map-link-input'),
     parseLinkBtn: $('btn-parse-link'),
     googleLink: $('link-google-maps'),
+    placeSearchForm: $('place-search-form'),
+    placeSearchInput: $('place-search-input'),
+    placeSearchBtn: $('btn-place-search'),
+    placeSearchStatus: $('place-search-status'),
+    placeResults: $('place-results'),
 
     addressInput: $('address-input'),
     addressStatus: $('address-status'),
@@ -600,6 +606,94 @@ export async function handleImageFile(file, opts = {}) {
 }
 
 // ---------------------------------------------------------------------------
+// Place-name search
+// ---------------------------------------------------------------------------
+
+let placeSearchAbort = null;
+
+function setPlaceSearchStatus(text) {
+  if (!el.placeSearchStatus) return;
+  el.placeSearchStatus.textContent = text;
+  el.placeSearchStatus.hidden = !text;
+}
+
+function clearPlaceResults() {
+  if (!el.placeResults) return;
+  el.placeResults.innerHTML = '';
+  el.placeResults.hidden = true;
+}
+
+async function runPlaceSearch() {
+  const query = el.placeSearchInput?.value.trim() || '';
+  clearPlaceResults();
+  if (!query) {
+    setPlaceSearchStatus('พิมพ์ชื่อสถานที่ก่อน');
+    return;
+  }
+  // A pasted Google Maps link or "lat, lon" works here too
+  if (parseLocationInput(query) || isShortMapUrl(query)) {
+    if (applyLocationText(query, 'link')) setPlaceSearchStatus('');
+    return;
+  }
+  el.placeSearchInput.blur(); // Hide the on-screen keyboard so the results are visible
+
+  placeSearchAbort?.abort();
+  placeSearchAbort = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const q = query.toLowerCase();
+  const saved = [...getDefaultPresets(), ...getCustomPresets()]
+    .filter(p => p.name.toLowerCase().includes(q))
+    .map(p => ({ name: p.name, detail: p.address || 'พิกัดที่บันทึกไว้', lat: p.lat, lon: p.lon, address: p.address, saved: true }));
+
+  el.placeSearchBtn?.classList.add('is-busy');
+  setPlaceSearchStatus('กำลังค้นหา…');
+  let found = [];
+  try {
+    found = await searchPlaces(query, { limit: 6, signal: placeSearchAbort?.signal });
+  } catch (err) {
+    if (err?.name === 'AbortError') return;
+  } finally {
+    el.placeSearchBtn?.classList.remove('is-busy');
+  }
+
+  const results = [...saved, ...found];
+  if (!results.length) {
+    setPlaceSearchStatus(navigator.onLine === false
+      ? 'ไม่มีอินเทอร์เน็ต — ค้นหาไม่ได้'
+      : `ไม่พบ "${query}" — ลองพิมพ์ชื่ออื่น ใส่ชื่ออำเภอ/จังหวัดด้วย หรือแตะเลือกบนแผนที่`);
+    return;
+  }
+  setPlaceSearchStatus(results.length === 1 ? '' : `พบ ${results.length} แห่ง — แตะเพื่อเลือก`);
+  if (results.length === 1) {
+    pickPlace(results[0]);
+    return;
+  }
+  for (const place of results) {
+    const li = document.createElement('li');
+    li.className = 'preset-item';
+    const pick = document.createElement('button');
+    pick.type = 'button';
+    pick.className = 'preset-pick';
+    const name = document.createElement('span');
+    name.className = 'preset-name';
+    name.textContent = place.saved ? `★ ${place.name}` : place.name;
+    const meta = document.createElement('span');
+    meta.className = 'preset-meta';
+    meta.textContent = place.detail;
+    pick.append(name, meta);
+    pick.addEventListener('click', () => pickPlace(place));
+    li.appendChild(pick);
+    el.placeResults.appendChild(li);
+  }
+  el.placeResults.hidden = false;
+}
+
+function pickPlace(place) {
+  clearPlaceResults();
+  setPlaceSearchStatus(`เลือก: ${place.name}`);
+  setLocation(place.lat, place.lon, place.saved ? 'preset' : 'search', place.address ? { address: place.address } : {});
+}
+
+// ---------------------------------------------------------------------------
 // Saved locations (presets)
 // ---------------------------------------------------------------------------
 
@@ -865,6 +959,11 @@ export function setupEventListeners() {
     if (e.key === 'Enter') { e.preventDefault(); onLinkSubmit(); }
   });
   el.mapLinkInput?.addEventListener('paste', () => setTimeout(onLinkSubmit, 50));
+
+  el.placeSearchForm?.addEventListener('submit', (e) => {
+    e.preventDefault();
+    runPlaceSearch();
+  });
 
   el.gpsBtn?.addEventListener('click', () => requestDeviceLocation());
   el.presetsBtn?.addEventListener('click', openPresetsSheet);
