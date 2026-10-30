@@ -1,18 +1,21 @@
 /**
  * app.js
  *
- * UI wiring for Timestamp Camera Web.
+ * UI wiring for Timestamp Camera Web (Single Photo & Multi-Photo Batch Mode).
  *
  * Flow:
- * 1. User picks / captures a photo.
+ * 1. User picks / captures 1 or multiple photos.
  * 2. GPS in the photo's EXIF becomes the stamp location (lat/lon), and the location is
  *    reverse geocoded online (Google if a key is configured, otherwise OpenStreetMap)
  *    into "อ.<อำเภอ>, จ.<จังหวัด>".
- * 3. No GPS in the photo → keep the previous location and offer: device GPS, saved
- *    locations, map, or a pasted Google Maps link.
+ * 3. When multiple photos are selected (Batch Mode):
+ *    - Photo #1 starts at the selected base date/time and base coordinate.
+ *    - Each subsequent photo (#2, #3, ...) automatically advances its timestamp by a random
+ *      2–5 minutes (120–300 seconds) and jitters its coordinate by a random 5–10 meters
+ *      from the previous photo.
  * 4. Date/time is always chosen by the user (live clock, or any past/future value).
- * 5. Export renders the full-resolution JPEG, then a result sheet offers Share/Save
- *    (fresh tap keeps iOS Web Share happy) and a direct download.
+ * 5. Export renders full-resolution JPEG(s), then a result sheet offers Share/Save
+ *    (supporting multi-file Web Share on iOS/Android) and direct download.
  */
 
 import {
@@ -33,7 +36,16 @@ import {
 import { formatThaiBuddhistDate, toValidDate } from './thai-datetime.js';
 import { formatCoordinates, formatSignedComponent, isValidCoordinate, parseLocationInput, isShortMapUrl } from './coordinates.js';
 import { resolveThaiAddress, searchPlaces } from './geocoder.js';
-import { getDefaultPresets, getCustomPresets, saveCustomPreset, deleteCustomPreset, jitterCoordinate, PRESET_SLOT_COUNT } from './presets.js';
+import {
+  getDefaultPresets,
+  getCustomPresets,
+  saveCustomPreset,
+  deleteCustomPreset,
+  jitterCoordinate,
+  distanceMeters,
+  randomBatchTimeStepSeconds,
+  PRESET_SLOT_COUNT
+} from './presets.js';
 import { parseExif, readJpegSize } from './exif-parser.js';
 import { loadWatermarkFonts } from './font-loader.js';
 import { renderPreview, renderWatermark, exportFullResolution } from './watermark-engine.js';
@@ -46,6 +58,7 @@ const SOURCE_LABELS = {
   default: { text: 'ค่าเริ่มต้น', tone: '' },
   last: { text: 'ใช้ล่าสุด', tone: '' },
   exif: { text: 'จากรูปภาพ', tone: 'is-ok' },
+  batch: { text: 'สุ่มพิกัด 5–10 ม.', tone: 'is-accent' },
   gps: { text: 'GPS เครื่องนี้', tone: 'is-ok' },
   map: { text: 'เลือกบนแผนที่', tone: 'is-accent' },
   preset: { text: 'พิกัดที่บันทึกไว้', tone: 'is-accent' },
@@ -66,8 +79,14 @@ let addressToken = 0;
 let exportBlob = null;
 let exportUrl = null;
 let exportFilename = '';
-let imageOrientation = 1;   // EXIF orientation the browser's decoder did NOT apply, so we draw it
-let userQuarterTurns = 0;   // Extra clockwise 90° turns from the rotate button
+let batchExportResults = []; // Array of { blob, url, filename, file }
+let imageOrientation = 1;    // EXIF orientation the browser's decoder did NOT apply, so we draw it
+let userQuarterTurns = 0;    // Extra clockwise 90° turns from the rotate button
+
+// Multi-photo batch state
+let batchItems = [];         // Array of batch item objects
+let activeBatchIndex = 0;    // Index of currently previewed photo in batchItems
+let isSwitchingBatchItem = false;
 
 // 2x1 JPEG tagged EXIF orientation 6: a decoder that honours the tag returns a 1x2 image
 const ORIENTATION_TEST_JPEG = '/9j/4AAQSkZJRgABAQAAAQABAAD/4QAiRXhpZgAATU0AKgAAAAgAAQESAAMAAAABAAYAAAAAAAD/2wBDAFA3PEY8MlBGQUZaVVBfeMiCeG5uePWvuZHI////////////////////////////////////////////////////2wBDAVVaWnhpeOuCguv/////////////////////////////////////////////////////////////////////////wAARCAABAAIDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwCKiiiszsP/2Q==';
@@ -90,7 +109,15 @@ export function queryDOMElements() {
     bannerText: $('gps-banner-text'),
     bannerActions: $('gps-banner-actions'),
 
+    batchBar: $('batch-bar'),
+    batchCountBadge: $('batch-count-badge'),
+    batchSummary: $('batch-summary'),
+    batchList: $('batch-list'),
+    rerollBatchBtn: $('btn-reroll-batch'),
+    addImagesBtn: $('btn-add-images'),
+
     fileInput: $('file-input'),
+    addFilesInput: $('add-files-input'),
     cameraInput: $('camera-input'),
     albumBtn: $('btn-album'),
     cameraBtn: $('btn-camera'),
@@ -102,6 +129,7 @@ export function queryDOMElements() {
     liveToggle: $('live-time-toggle'),
     datetimeInput: $('datetime-input'),
     secondsInput: $('seconds-input'),
+    randomStepBtn: $('btn-random-step'),
     exifTimeBtn: $('btn-exif-time'),
 
     coordsSource: $('coords-source'),
@@ -130,7 +158,9 @@ export function queryDOMElements() {
     savePresetBtn: $('btn-save-preset'),
 
     resultSheet: $('result-sheet'),
+    resultTitle: $('result-title'),
     resultImage: $('result-image'),
+    resultBatchGrid: $('result-batch-grid'),
     resultHint: $('result-hint'),
     shareBtn: $('btn-share'),
     downloadBtn: $('btn-download'),
@@ -228,6 +258,12 @@ function toMinuteLocalString(d) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+function formatShortTime(d) {
+  if (!(d instanceof Date) || Number.isNaN(d.getTime())) return '--:--:--';
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
 function syncDateTimeControls(state) {
   const d = state.dateTime;
   if (el.datetimeOutput) el.datetimeOutput.textContent = formatThaiBuddhistDate(d);
@@ -240,6 +276,24 @@ function syncDateTimeControls(state) {
   }
 }
 
+function propagateDateTimeAcrossBatch(newDateForActive) {
+  if (!batchItems.length || isSwitchingBatchItem) return;
+  const active = batchItems[activeBatchIndex];
+  if (!active) return;
+
+  active.dateTime = new Date(newDateForActive.getTime());
+
+  // Cascade forward to subsequent items in the batch using their 2-5 min stepSeconds
+  for (let i = activeBatchIndex + 1; i < batchItems.length; i++) {
+    const prev = batchItems[i - 1];
+    if (!batchItems[i].stepSeconds || batchItems[i].stepSeconds < 120) {
+      batchItems[i].stepSeconds = randomBatchTimeStepSeconds({ prevDate: prev.dateTime });
+    }
+    batchItems[i].dateTime = new Date(prev.dateTime.getTime() + batchItems[i].stepSeconds * 1000);
+  }
+  renderBatchStrip();
+}
+
 function applyCustomDateTimeFromInputs() {
   const value = el.datetimeInput?.value || '';
   const match = value.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
@@ -249,14 +303,37 @@ function applyCustomDateTimeFromInputs() {
   seconds = Math.min(59, Math.max(0, seconds));
   const [, y, mo, d, h, mi] = match.map(Number);
   const next = new Date(y, mo - 1, d, h, mi, seconds);
-  if (!Number.isNaN(next.getTime())) setCustomDateTime(next);
+  if (!Number.isNaN(next.getTime())) {
+    setCustomDateTime(next);
+    propagateDateTimeAcrossBatch(next);
+  }
 }
 
-function shiftDateTime({ days = 0, minutes = 0 }) {
+function shiftDateTime({ days = 0, minutes = 0, seconds = 0 }) {
   const base = new Date(getState().dateTime.getTime());
   if (days) base.setDate(base.getDate() + days);
   if (minutes) base.setMinutes(base.getMinutes() + minutes);
+  if (seconds) base.setSeconds(base.getSeconds() + seconds);
   setCustomDateTime(base);
+  propagateDateTimeAcrossBatch(base);
+}
+
+/**
+ * Steps current time forward by 2–5 minutes (120–300s) and jitters coordinates by 5–10 meters.
+ */
+function stepRandomTimeAndCoord() {
+  const state = getState();
+  const stepSec = randomBatchTimeStepSeconds({ prevDate: state.dateTime });
+  const nextDate = new Date(state.dateTime.getTime() + stepSec * 1000);
+  const jittered = jitterCoordinate(state.lat, state.lon, { avoid: { lat: state.lat, lon: state.lon } });
+
+  setCustomDateTime(nextDate);
+  propagateDateTimeAcrossBatch(nextDate);
+
+  setLocation(jittered.lat, jittered.lon, 'batch', { address: state.address });
+  const minPart = Math.floor(stepSec / 60);
+  const secPart = stepSec % 60;
+  showToast(`ขยับเวลา +${minPart} นาที ${secPart} วิ · ขยับพิกัด ${jittered.meters.toFixed(1)} ม.`);
 }
 
 export function startClock() {
@@ -316,7 +393,10 @@ export function refreshAddress() {
     onUpdate: (address, meta = {}) => {
       const now = getState();
       if (token !== addressToken || now.isAddressManual || now.lat !== lat || now.lon !== lon) return;
-      if (address) setAddress(address, false);
+      if (address) {
+        setAddress(address, false);
+        syncAddressAcrossBatch(address);
+      }
       lastSource = meta.source || 'offline';
       if (lastSource !== 'offline') {
         setTag(el.addressStatus, `จาก ${PROVIDER_LABELS[lastSource] || lastSource}`, 'is-ok');
@@ -325,6 +405,7 @@ export function refreshAddress() {
     }
   }).then((finalAddress) => {
     if (token !== addressToken || getState().isAddressManual) return;
+    if (finalAddress) syncAddressAcrossBatch(finalAddress);
     if (lastSource === 'offline') {
       if (finalAddress) {
         setTag(el.addressStatus, 'ประมาณ (ออฟไลน์)', 'is-warn');
@@ -334,6 +415,41 @@ export function refreshAddress() {
       rememberLocation();
     }
   });
+}
+
+function syncAddressAcrossBatch(address) {
+  if (!batchItems.length || !address) return;
+  for (const item of batchItems) {
+    item.address = address;
+  }
+}
+
+function propagateLocationAcrossBatch(anchorLat, anchorLon, source, explicitAddress) {
+  if (!batchItems.length || isSwitchingBatchItem) return;
+  const active = batchItems[activeBatchIndex];
+  if (!active) return;
+
+  active.lat = parseFloat(Number(anchorLat).toFixed(6));
+  active.lon = parseFloat(Number(anchorLon).toFixed(6));
+  active.source = source;
+  if (explicitAddress) active.address = explicitAddress;
+
+  // If the user explicitly changed location (via preset, map, search, link, gps) while multiple photos are loaded,
+  // update all other photos in the batch to jitter 5–10m sequentially from the new location!
+  if (batchItems.length > 1 && ['preset', 'map', 'search', 'link', 'gps', 'manual'].includes(source)) {
+    let prevPoint = { lat: active.lat, lon: active.lon };
+    for (let i = 0; i < batchItems.length; i++) {
+      if (i === activeBatchIndex) continue;
+      const j = jitterCoordinate(prevPoint.lat, prevPoint.lon, { avoid: prevPoint });
+      batchItems[i].lat = j.lat;
+      batchItems[i].lon = j.lon;
+      batchItems[i].metersFromPrev = j.meters;
+      batchItems[i].source = 'batch';
+      if (explicitAddress) batchItems[i].address = explicitAddress;
+      prevPoint = { lat: j.lat, lon: j.lon };
+    }
+    renderBatchStrip();
+  }
 }
 
 /**
@@ -359,11 +475,14 @@ export function setLocation(lat, lon, source, opts = {}) {
   if (hasPresetAddress) {
     addressToken++;
     setAddress(opts.address, false);
-    setTag(el.addressStatus, 'จากพิกัดที่บันทึกไว้', 'is-accent');
+    syncAddressAcrossBatch(opts.address);
+    setTag(el.addressStatus, source === 'batch' ? 'สุ่มพิกัด 5–10 ม.' : 'จากพิกัดที่บันทึกไว้', 'is-accent');
     rememberLocation();
   } else {
     refreshAddress();
   }
+
+  propagateLocationAcrossBatch(state.lat, state.lon, source, hasPresetAddress ? opts.address : state.address);
   return true;
 }
 
@@ -456,7 +575,7 @@ function hideBanner() {
 }
 
 // ---------------------------------------------------------------------------
-// Photo loading
+// Photo loading & Multi-Photo Batch Management
 // ---------------------------------------------------------------------------
 
 function loadImageElement(file) {
@@ -522,68 +641,386 @@ async function findUnappliedOrientation(file, exifOrientation, decoded) {
   return (await decoderAppliesOrientation(decoded.method)) ? 1 : exifOrientation;
 }
 
-function getDrawOrientation() {
+function getItemDrawOrientation(baseOrient, quarterTurns) {
   for (const row of ORIENTATION_BY_TURNS) {
-    const turns = row.indexOf(imageOrientation);
-    if (turns >= 0) return row[(turns + userQuarterTurns) % 4];
+    const turns = row.indexOf(baseOrient);
+    if (turns >= 0) return row[(turns + quarterTurns) % 4];
   }
   return 1;
+}
+
+function getDrawOrientation() {
+  return getItemDrawOrientation(imageOrientation, userQuarterTurns);
 }
 
 function rotateImage() {
   if (!getState().image) return;
   userQuarterTurns = (userQuarterTurns + 1) % 4;
+  if (batchItems[activeBatchIndex]) {
+    batchItems[activeBatchIndex].userQuarterTurns = userQuarterTurns;
+  }
   scheduleRepaint();
 }
 
-/**
- * @param {File} file
- * @param {{ fromCamera?: boolean }} [opts]
- */
-export async function handleImageFile(file, opts = {}) {
-  if (!file) return;
+function disposeBatchThumbnails(items) {
+  for (const item of items) {
+    if (item.thumbUrl && typeof URL !== 'undefined' && URL.revokeObjectURL) {
+      try { URL.revokeObjectURL(item.thumbUrl); } catch { /* ignore */ }
+    }
+  }
+}
 
-  const [exifResult, imageResult] = await Promise.allSettled([parseExif(file), decodeImage(file)]);
+function updateExportButtonLabel() {
+  if (!el.exportBtn) return;
+  if (batchItems.length > 1) {
+    el.exportBtn.textContent = `บันทึกทั้งหมด (${batchItems.length} ภาพ)`;
+  } else {
+    el.exportBtn.textContent = 'บันทึกภาพ';
+  }
+}
 
-  if (imageResult.status !== 'fulfilled') {
-    const isHeic = /heic|heif/i.test(file.type) || /\.(heic|heif)$/i.test(file.name || '');
-    showToast(isHeic
-      ? 'เบราว์เซอร์นี้เปิดไฟล์ HEIC ไม่ได้ — เปิดเว็บนี้บน iPhone (Safari) หรือแปลงรูปเป็น JPG ก่อน'
-      : 'เปิดไฟล์รูปนี้ไม่ได้', 6000);
+export function renderBatchStrip() {
+  if (!el.batchBar || !el.batchList) return;
+  if (batchItems.length === 0) {
+    el.batchBar.hidden = true;
+    el.batchList.innerHTML = '';
+    updateExportButtonLabel();
     return;
   }
 
-  const exif = exifResult.status === 'fulfilled' ? exifResult.value : null;
-  imageOrientation = await findUnappliedOrientation(file, exif?.orientation, imageResult.value);
-  userQuarterTurns = 0;
-  setImage(imageResult.value.image, file, file.name || 'photo.jpg');
+  el.batchBar.hidden = false;
+  if (el.batchCountBadge) {
+    el.batchCountBadge.textContent = batchItems.length > 1
+      ? `รูปที่ ${activeBatchIndex + 1} / ${batchItems.length}`
+      : '1 ภาพ';
+  }
+  if (el.batchSummary) {
+    if (batchItems.length > 1) {
+      const active = batchItems[activeBatchIndex];
+      if (activeBatchIndex === 0) {
+        el.batchSummary.textContent = `ภาพเริ่มต้น (${formatShortTime(active.dateTime)}) · ภาพถัดไปสุ่ม +2–5 นาที & 5–10 ม.`;
+      } else {
+        const minStep = Math.floor((active.stepSeconds || 0) / 60);
+        const secStep = (active.stepSeconds || 0) % 60;
+        const dist = (active.metersFromPrev || 0).toFixed(1);
+        el.batchSummary.textContent = `+${minStep} นาที ${secStep} วิ จากภาพก่อน · ห่าง ${dist} ม.`;
+      }
+    } else {
+      el.batchSummary.textContent = 'กด "+ เพิ่มรูป" เพื่อเลือกหลายภาพ หรือกด "🎲 สุ่มเวลา/พิกัดใหม่"';
+    }
+  }
 
-  const exifDate = toValidDate(exif?.dateTime);
-  updateState({
-    exifData: exif?.hasExif ? {
-      orientation: 1,
-      dateTime: exifDate,
-      latitude: exif.latitude ?? null,
-      longitude: exif.longitude ?? null,
-      altitude: exif.altitude ?? null
-    } : null
+  el.batchList.innerHTML = '';
+  batchItems.forEach((item, idx) => {
+    const card = document.createElement('div');
+    card.className = `batch-item${idx === activeBatchIndex ? ' is-active' : ''}`;
+
+    const selectBtn = document.createElement('button');
+    selectBtn.type = 'button';
+    selectBtn.className = 'batch-select';
+    selectBtn.setAttribute('role', 'tab');
+    selectBtn.setAttribute('aria-selected', idx === activeBatchIndex ? 'true' : 'false');
+    selectBtn.addEventListener('click', () => selectBatchItem(idx));
+
+    if (item.thumbUrl) {
+      const img = document.createElement('img');
+      img.className = 'batch-thumb';
+      img.src = item.thumbUrl;
+      img.alt = `รูปที่ ${idx + 1}`;
+      selectBtn.appendChild(img);
+    }
+
+    const meta = document.createElement('div');
+    meta.className = 'batch-meta';
+
+    const timeSpan = document.createElement('span');
+    timeSpan.className = 'batch-meta-time';
+    timeSpan.textContent = formatShortTime(item.dateTime);
+
+    const offsetSpan = document.createElement('span');
+    offsetSpan.className = 'batch-meta-offset';
+    if (idx === 0) {
+      offsetSpan.textContent = item.metersFromPrev > 0
+        ? `เริ่มต้น · ${item.metersFromPrev.toFixed(1)} ม.`
+        : 'ภาพเริ่มต้น';
+    } else {
+      const m = Math.floor((item.stepSeconds || 0) / 60);
+      const s = String((item.stepSeconds || 0) % 60).padStart(2, '0');
+      offsetSpan.textContent = `+${m}:${s} นาที · ${(item.metersFromPrev || 0).toFixed(1)} ม.`;
+    }
+
+    meta.append(timeSpan, offsetSpan);
+    selectBtn.appendChild(meta);
+
+    const badge = document.createElement('span');
+    badge.className = 'batch-badge';
+    badge.textContent = `#${idx + 1}`;
+
+    card.append(selectBtn, badge);
+
+    if (batchItems.length > 1) {
+      const removeBtn = document.createElement('button');
+      removeBtn.type = 'button';
+      removeBtn.className = 'batch-remove';
+      removeBtn.title = `ลบรูปที่ ${idx + 1}`;
+      removeBtn.setAttribute('aria-label', `ลบรูปที่ ${idx + 1}`);
+      removeBtn.textContent = '✕';
+      removeBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        removeBatchItem(idx);
+      });
+      card.appendChild(removeBtn);
+    }
+
+    el.batchList.appendChild(card);
   });
-  if (el.exifTimeBtn) el.exifTimeBtn.hidden = !exifDate;
 
-  const hasGps = typeof exif?.latitude === 'number' && typeof exif?.longitude === 'number' &&
-    isValidCoordinate(exif.latitude, exif.longitude) && !(exif.latitude === 0 && exif.longitude === 0);
-  updateState({ hasExifGps: hasGps });
+  updateExportButtonLabel();
+}
 
-  if (hasGps) {
-    setLocation(exif.latitude, exif.longitude, 'exif');
+export function selectBatchItem(index) {
+  if (index < 0 || index >= batchItems.length) return;
+  activeBatchIndex = index;
+  const item = batchItems[index];
+
+  isSwitchingBatchItem = true;
+  try {
+    imageOrientation = item.imageOrientation;
+    userQuarterTurns = item.userQuarterTurns;
+    setImage(item.image, item.file, item.name);
+    setCustomDateTime(item.dateTime);
+    updateCoordinates(item.lat, item.lon, { skipAddressUpdate: true });
+    if (item.address) setAddress(item.address, getState().isAddressManual);
+    setMapCoordinates(item.lat, item.lon, false, { silent: true });
+    renderCoordsSource(item.source || 'batch');
+    if (el.exifTimeBtn) el.exifTimeBtn.hidden = !item.exifDate;
+  } finally {
+    isSwitchingBatchItem = false;
+  }
+
+  renderBatchStrip();
+  scheduleRepaint();
+}
+
+function removeBatchItem(index) {
+  if (index < 0 || index >= batchItems.length) return;
+  const [removed] = batchItems.splice(index, 1);
+  if (removed) disposeBatchThumbnails([removed]);
+
+  if (batchItems.length === 0) {
+    activeBatchIndex = 0;
+    setImage(null, null, '');
+    renderBatchStrip();
+    return;
+  }
+
+  if (activeBatchIndex >= batchItems.length) {
+    activeBatchIndex = batchItems.length - 1;
+  }
+  selectBatchItem(activeBatchIndex);
+}
+
+/**
+ * Re-randomizes time steps (+2 to 5 min per photo) and coordinate jitters (5 to 10 m per photo)
+ * across the entire batch.
+ */
+export function rerollBatchSchedule() {
+  if (batchItems.length <= 1) {
+    stepRandomTimeAndCoord();
+    return;
+  }
+
+  const first = batchItems[0];
+  let currentDate = new Date(first.dateTime.getTime());
+  // Also jitter the first item 5-10m from its anchor so re-rolling gives a fresh set of coordinates
+  const firstJitter = jitterCoordinate(first.baseLat, first.baseLon, { avoid: { lat: first.lat, lon: first.lon } });
+  first.lat = firstJitter.lat;
+  first.lon = firstJitter.lon;
+  first.metersFromPrev = firstJitter.meters;
+  first.source = 'batch';
+
+  let prevPoint = { lat: first.lat, lon: first.lon };
+  for (let i = 1; i < batchItems.length; i++) {
+    const item = batchItems[i];
+    const stepSeconds = randomBatchTimeStepSeconds({ prevDate: currentDate });
+    currentDate = new Date(currentDate.getTime() + stepSeconds * 1000);
+    item.stepSeconds = stepSeconds;
+    item.dateTime = new Date(currentDate.getTime());
+
+    const anchorLat = item.hasExifGps && distanceMeters(item.baseLat, item.baseLon, prevPoint.lat, prevPoint.lon) > 20
+      ? item.baseLat
+      : prevPoint.lat;
+    const anchorLon = item.hasExifGps && distanceMeters(item.baseLat, item.baseLon, prevPoint.lat, prevPoint.lon) > 20
+      ? item.baseLon
+      : prevPoint.lon;
+
+    const j = jitterCoordinate(anchorLat, anchorLon, { avoid: prevPoint });
+    item.lat = j.lat;
+    item.lon = j.lon;
+    item.metersFromPrev = distanceMeters(prevPoint.lat, prevPoint.lon, j.lat, j.lon);
+    item.source = 'batch';
+    prevPoint = { lat: j.lat, lon: j.lon };
+  }
+
+  selectBatchItem(activeBatchIndex);
+  showToast(`สุ่มเวลาใหม่ (+2–5 นาที/ภาพ) และสุ่มพิกัดใหม่ (5–10 ม./ภาพ) ทั้ง ${batchItems.length} ภาพแล้ว`);
+}
+
+/**
+ * Decodes and adds one or more File objects into the batch.
+ * @param {FileList|File[]} files
+ * @param {{ fromCamera?: boolean, append?: boolean }} [opts]
+ */
+export async function handleImageFiles(files, opts = {}) {
+  const list = Array.from(files || []).filter(Boolean);
+  if (!list.length) return;
+
+  if (!opts.append) {
+    disposeBatchThumbnails(batchItems);
+    batchItems = [];
+    activeBatchIndex = 0;
+  }
+
+  const decodedItems = [];
+  for (const file of list) {
+    const [exifResult, imageResult] = await Promise.allSettled([parseExif(file), decodeImage(file)]);
+    if (imageResult.status !== 'fulfilled') {
+      const isHeic = /heic|heif/i.test(file.type) || /\.(heic|heif)$/i.test(file.name || '');
+      showToast(isHeic
+        ? 'เบราว์เซอร์นี้เปิดไฟล์ HEIC ไม่ได้ — เปิดเว็บนี้บน iPhone (Safari) หรือแปลงรูปเป็น JPG ก่อน'
+        : `เปิดไฟล์ ${file.name || 'รูปนี้'} ไม่ได้`, 6000);
+      continue;
+    }
+
+    const exif = exifResult.status === 'fulfilled' ? exifResult.value : null;
+    const unappliedOrient = await findUnappliedOrientation(file, exif?.orientation, imageResult.value);
+    const exifDate = toValidDate(exif?.dateTime);
+    const hasGps = typeof exif?.latitude === 'number' && typeof exif?.longitude === 'number' &&
+      isValidCoordinate(exif.latitude, exif.longitude) && !(exif.latitude === 0 && exif.longitude === 0);
+
+    const thumbUrl = (typeof URL !== 'undefined' && URL.createObjectURL && file instanceof Blob)
+      ? URL.createObjectURL(file)
+      : '';
+
+    decodedItems.push({
+      id: `item_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+      file,
+      name: file.name || 'photo.jpg',
+      image: imageResult.value.image,
+      thumbUrl,
+      imageOrientation: unappliedOrient,
+      userQuarterTurns: 0,
+      exif,
+      exifDate,
+      hasExifGps: hasGps,
+      baseLat: hasGps ? parseFloat(exif.latitude.toFixed(6)) : null,
+      baseLon: hasGps ? parseFloat(exif.longitude.toFixed(6)) : null,
+      lat: 0,
+      lon: 0,
+      metersFromPrev: 0,
+      stepSeconds: 0,
+      dateTime: new Date(),
+      address: getState().address,
+      source: hasGps ? 'exif' : 'default'
+    });
+  }
+
+  if (!decodedItems.length) return;
+
+  const state = getState();
+  const isAddingToExisting = opts.append && batchItems.length > 0;
+  const isMultiPhoto = (batchItems.length + decodedItems.length) > 1;
+
+  // Freeze live clock when loading multiple photos so timestamps stay locked to the batch schedule
+  if (isMultiPhoto && state.isLiveTime) {
+    setLiveTime(false);
+  }
+
+  // Determine starting anchor date & coordinates
+  let prevDate = isAddingToExisting
+    ? new Date(batchItems[batchItems.length - 1].dateTime.getTime())
+    : new Date(getState().dateTime.getTime());
+
+  const firstWithGps = decodedItems.find(it => it.hasExifGps);
+  let anchorLat = isAddingToExisting
+    ? batchItems[batchItems.length - 1].lat
+    : (firstWithGps ? firstWithGps.baseLat : state.lat);
+  let anchorLon = isAddingToExisting
+    ? batchItems[batchItems.length - 1].lon
+    : (firstWithGps ? firstWithGps.baseLon : state.lon);
+
+  let prevPoint = { lat: anchorLat, lon: anchorLon };
+
+  decodedItems.forEach((item, idx) => {
+    const globalIndex = batchItems.length;
+    if (item.baseLat === null || item.baseLon === null) {
+      item.baseLat = anchorLat;
+      item.baseLon = anchorLon;
+    }
+
+    if (globalIndex === 0) {
+      // First photo in the batch: uses base dateTime and initial coordinate
+      item.stepSeconds = 0;
+      item.dateTime = new Date(prevDate.getTime());
+      item.lat = item.baseLat;
+      item.lon = item.baseLon;
+      item.metersFromPrev = 0;
+      item.source = item.hasExifGps ? 'exif' : 'default';
+      prevPoint = { lat: item.lat, lon: item.lon };
+    } else {
+      // Subsequent photos (#2, #3, ...):
+      // 1) Random time step +2 to 5 minutes (120-300 seconds) from previous photo
+      const stepSec = randomBatchTimeStepSeconds({ prevDate });
+      prevDate = new Date(prevDate.getTime() + stepSec * 1000);
+      item.stepSeconds = stepSec;
+      item.dateTime = new Date(prevDate.getTime());
+
+      // 2) Random coordinate jitter 5 to 10 meters from previous photo (or from its own EXIF GPS if at a different site)
+      const baseForJitter = (item.hasExifGps && distanceMeters(item.baseLat, item.baseLon, prevPoint.lat, prevPoint.lon) > 20)
+        ? { lat: item.baseLat, lon: item.baseLon }
+        : prevPoint;
+
+      const j = jitterCoordinate(baseForJitter.lat, baseForJitter.lon, { avoid: prevPoint });
+      item.lat = j.lat;
+      item.lon = j.lon;
+      item.metersFromPrev = distanceMeters(prevPoint.lat, prevPoint.lon, j.lat, j.lon);
+      item.source = 'batch';
+      prevPoint = { lat: j.lat, lon: j.lon };
+    }
+
+    batchItems.push(item);
+  });
+
+  // Select the first photo (or first newly added photo) and resolve address
+  const targetIndex = isAddingToExisting ? batchItems.length - decodedItems.length : 0;
+  const primary = batchItems[0];
+
+  updateState({
+    exifData: primary.exif?.hasExif ? {
+      orientation: 1,
+      dateTime: primary.exifDate,
+      latitude: primary.exif.latitude ?? null,
+      longitude: primary.exif.longitude ?? null,
+      altitude: primary.exif.altitude ?? null
+    } : null,
+    hasExifGps: primary.hasExifGps
+  });
+
+  selectBatchItem(targetIndex);
+
+  // Trigger address lookup for the anchor coordinate
+  if (primary.hasExifGps) {
+    setLocation(batchItems[activeBatchIndex].lat, batchItems[activeBatchIndex].lon, batchItems.length > 1 ? 'batch' : 'exif');
     const now = getState();
-    showBanner('is-ok', `ใช้พิกัดจากรูป: ${formatCoordinates(now.lat, now.lon)} · ${now.address}`);
-    // Banner text follows the address lookup
+    const batchNote = batchItems.length > 1
+      ? ` · สุ่มเวลา +2–5 นาที & พิกัด 5–10 ม. ครบ ${batchItems.length} ภาพ`
+      : '';
+    showBanner('is-ok', `ใช้พิกัดจากรูป: ${formatCoordinates(now.lat, now.lon)} · ${now.address}${batchNote}`);
     const token = addressToken;
-    const unsub = subscribe((state, keys) => {
+    const unsub = subscribe((st, keys) => {
       if (token !== addressToken) { unsub(); return; }
       if (keys.includes('address')) {
-        el.bannerText.textContent = `ใช้พิกัดจากรูป: ${formatCoordinates(state.lat, state.lon)} · ${state.address}`;
+        el.bannerText.textContent = `ใช้พิกัดจากรูป: ${formatCoordinates(st.lat, st.lon)} · ${st.address}${batchNote}`;
       }
     });
     return;
@@ -595,6 +1032,18 @@ export async function handleImageFile(file, opts = {}) {
     return;
   }
 
+  if (batchItems.length > 1) {
+    showBanner(
+      'is-ok',
+      `โหลด ${batchItems.length} ภาพแล้ว — สุ่มเวลาห่างกัน 2–5 นาที และสุ่มพิกัดห่างกัน 5–10 เมตรต่อภาพเรียบร้อย (เลือกจุดหลักจากพิกัดที่บันทึกไว้หรือแผนที่ได้)`,
+      [
+        { label: 'พิกัดที่บันทึกไว้', onClick: () => openPresetsSheet() },
+        { label: '🎲 สุ่มใหม่อีกครั้ง', onClick: () => rerollBatchSchedule() }
+      ]
+    );
+    return;
+  }
+
   showBanner(
     'is-warn',
     'รูปนี้ไม่มีพิกัด GPS (หรือถูกตัดออกตอนเลือกรูป) — ตอนนี้ใช้พิกัดเดิมอยู่ เลือกพิกัดใหม่ได้จากปุ่มด้านล่างหรือแผนที่ · เคล็ดลับ: เลือกรูปผ่าน "ไฟล์/Files" แทน "คลังรูปภาพ" มักได้พิกัดครบกว่า',
@@ -603,6 +1052,16 @@ export async function handleImageFile(file, opts = {}) {
       { label: 'พิกัดที่บันทึกไว้', onClick: () => openPresetsSheet() }
     ]
   );
+}
+
+/**
+ * Single-file backward-compatible entrypoint.
+ * @param {File} file
+ * @param {{ fromCamera?: boolean, append?: boolean }} [opts]
+ */
+export async function handleImageFile(file, opts = {}) {
+  if (!file) return;
+  return handleImageFiles([file], opts);
 }
 
 // ---------------------------------------------------------------------------
@@ -758,7 +1217,7 @@ export function renderPresetList() {
 
 let lastPresetPoint = null;
 
-/** Uses a saved location, shifted a random 5–15 m so no two stamps share exact coordinates. */
+/** Uses a saved location, shifted a random 5–10 m so no two stamps share exact coordinates. */
 function applyPreset(preset) {
   const point = jitterCoordinate(preset.lat, preset.lon, { avoid: lastPresetPoint });
   lastPresetPoint = { lat: point.lat, lon: point.lon };
@@ -808,8 +1267,17 @@ function saveCurrentAsPreset() {
 }
 
 // ---------------------------------------------------------------------------
-// Export
+// Export (Single & Multi-Photo Batch)
 // ---------------------------------------------------------------------------
+
+function cleanupBatchExportUrls() {
+  for (const item of batchExportResults) {
+    if (item.url && item.url.startsWith('blob:') && typeof URL !== 'undefined' && URL.revokeObjectURL) {
+      try { URL.revokeObjectURL(item.url); } catch { /* ignore */ }
+    }
+  }
+  batchExportResults = [];
+}
 
 async function runExport() {
   const state = getState();
@@ -818,9 +1286,99 @@ async function runExport() {
     return;
   }
 
+  // Save current edits on the active batch item before exporting
+  if (batchItems[activeBatchIndex]) {
+    batchItems[activeBatchIndex].dateTime = new Date(state.dateTime.getTime());
+    batchItems[activeBatchIndex].lat = state.lat;
+    batchItems[activeBatchIndex].lon = state.lon;
+    batchItems[activeBatchIndex].address = state.address;
+    batchItems[activeBatchIndex].userQuarterTurns = userQuarterTurns;
+  }
+
   el.exportBtn.classList.add('is-busy');
-  el.exportBtn.textContent = 'กำลังสร้างภาพ…';
+
   try {
+    cleanupBatchExportUrls();
+    const inApp = getInAppBrowserName();
+
+    // Multi-photo batch export
+    if (batchItems.length > 1) {
+      for (let i = 0; i < batchItems.length; i++) {
+        const item = batchItems[i];
+        el.exportBtn.textContent = `กำลังสร้างภาพ ${i + 1}/${batchItems.length}…`;
+        const itemData = {
+          dateTimeStr: formatThaiBuddhistDate(item.dateTime),
+          coordsStr: formatCoordinates(item.lat, item.lon),
+          addressStr: item.address || state.address
+        };
+        const orient = getItemDrawOrientation(item.imageOrientation, item.userQuarterTurns);
+        const blob = await exportFullResolution(item.image, itemData, {
+          orientation: orient,
+          quality: 0.92,
+          mimeType: 'image/jpeg'
+        });
+        const filename = generateExportFilename(item.name, item.dateTime);
+        const url = inApp ? await blobToDataUrl(blob) : URL.createObjectURL(blob);
+        const file = new File([blob], filename, { type: 'image/jpeg' });
+        batchExportResults.push({ blob, url, filename, file, dateTime: item.dateTime });
+      }
+
+      if (el.resultTitle) el.resultTitle.textContent = `สร้างครบ ${batchExportResults.length} ภาพแล้ว`;
+      if (el.resultImage) el.resultImage.hidden = true;
+      if (el.resultBatchGrid) {
+        el.resultBatchGrid.hidden = false;
+        el.resultBatchGrid.innerHTML = '';
+        batchExportResults.forEach((res, idx) => {
+          const card = document.createElement('div');
+          card.className = 'result-batch-card';
+
+          const img = document.createElement('img');
+          img.className = 'result-batch-img';
+          img.src = res.url;
+          img.alt = `ภาพที่ ${idx + 1}`;
+
+          const cap = document.createElement('div');
+          cap.className = 'result-batch-caption';
+          const label = document.createElement('span');
+          label.className = 'mono';
+          label.textContent = `#${idx + 1} · ${formatShortTime(res.dateTime)}`;
+
+          const dl = document.createElement('a');
+          dl.className = 'result-batch-dl';
+          dl.href = res.url;
+          dl.download = res.filename;
+          dl.textContent = 'ดาวน์โหลด';
+
+          cap.append(label, dl);
+          card.append(img, cap);
+          el.resultBatchGrid.appendChild(card);
+        });
+      }
+
+      const allFiles = batchExportResults.map(r => r.file);
+      const shareable = canUseWebShare(allFiles) || canUseWebShare(allFiles[0]);
+      el.shareBtn.hidden = !shareable;
+      el.shareBtn.textContent = `แชร์ / บันทึกทั้งหมด (${batchExportResults.length} ภาพ)`;
+
+      el.downloadBtn.removeAttribute('href');
+      el.downloadBtn.removeAttribute('download');
+      el.downloadBtn.textContent = `ดาวน์โหลดทั้งหมด (${batchExportResults.length} ไฟล์)`;
+      el.downloadBtn.hidden = !!inApp;
+
+      if (inApp) {
+        el.resultHint.textContent = getInAppSaveHint(inApp, shareable);
+      } else {
+        el.resultHint.textContent = shareable
+          ? `กด "แชร์ / บันทึกทั้งหมด" แล้วเลือก Save ${batchExportResults.length} Images · หรือกดค้างที่รูปแต่ละใบ`
+          : 'กด "ดาวน์โหลดทั้งหมด" เพื่อบันทึกไฟล์ลงเครื่อง';
+      }
+
+      openSheet(el.resultSheet);
+      return;
+    }
+
+    // Single-photo export
+    el.exportBtn.textContent = 'กำลังสร้างภาพ…';
     exportBlob = await exportFullResolution(state.image, getWatermarkData(state), {
       orientation: getDrawOrientation(),
       quality: 0.92,
@@ -830,16 +1388,25 @@ async function runExport() {
     if (exportUrl) URL.revokeObjectURL(exportUrl);
     exportUrl = URL.createObjectURL(exportBlob);
 
-    const inApp = getInAppBrowserName();
-    // In-app browsers save a long-pressed image by re-fetching its URL natively, which a blob: URL can't serve
-    el.resultImage.src = inApp ? await blobToDataUrl(exportBlob) : exportUrl;
+    if (el.resultTitle) el.resultTitle.textContent = 'ภาพพร้อมแล้ว';
+    if (el.resultBatchGrid) {
+      el.resultBatchGrid.hidden = true;
+      el.resultBatchGrid.innerHTML = '';
+    }
+    if (el.resultImage) {
+      el.resultImage.hidden = false;
+      // In-app browsers save a long-pressed image by re-fetching its URL natively, which a blob: URL can't serve
+      el.resultImage.src = inApp ? await blobToDataUrl(exportBlob) : exportUrl;
+    }
     el.downloadBtn.href = exportUrl;
     el.downloadBtn.download = exportFilename;
+    el.downloadBtn.textContent = 'ดาวน์โหลดไฟล์';
     el.downloadBtn.hidden = !!inApp;
 
     const file = new File([exportBlob], exportFilename, { type: 'image/jpeg' });
     const shareable = canUseWebShare(file);
     el.shareBtn.hidden = !shareable;
+    el.shareBtn.textContent = 'แชร์ / บันทึกลงอัลบั้ม';
     if (inApp) {
       el.resultHint.textContent = getInAppSaveHint(inApp, shareable);
     } else {
@@ -853,7 +1420,7 @@ async function runExport() {
     showToast('สร้างภาพไม่สำเร็จ: ' + (err?.message || err), 5000);
   } finally {
     el.exportBtn.classList.remove('is-busy');
-    el.exportBtn.textContent = 'บันทึกภาพ';
+    updateExportButtonLabel();
   }
 }
 
@@ -875,6 +1442,29 @@ function getInAppSaveHint(appName, shareable) {
 }
 
 async function shareExport() {
+  if (batchExportResults.length > 1) {
+    const files = batchExportResults.map(r => r.file);
+    try {
+      if (canUseWebShare(files)) {
+        await shareFile(files, `Timestamp Photos (${files.length})`);
+        return;
+      }
+      // Fallback if browser only supports single-file share
+      for (const res of batchExportResults) {
+        await shareFile(res.file, res.filename);
+      }
+      return;
+    } catch (err) {
+      const inApp = getInAppBrowserName();
+      if (inApp) {
+        showToast(getInAppSaveHint(inApp, false), 8000);
+        return;
+      }
+      downloadAllBatchResults();
+      return;
+    }
+  }
+
   if (!exportBlob) return;
   const file = new File([exportBlob], exportFilename, { type: 'image/jpeg' });
   try {
@@ -882,7 +1472,6 @@ async function shareExport() {
   } catch (err) {
     const inApp = getInAppBrowserName();
     if (inApp) {
-      // Downloads don't work here either; point to long-press / open in a real browser
       console.warn('[App] Share failed in in-app browser:', err);
       showToast(getInAppSaveHint(inApp, false), 8000);
       return;
@@ -890,6 +1479,15 @@ async function shareExport() {
     console.warn('[App] Share failed, downloading instead:', err);
     downloadBlob(exportBlob, exportFilename);
   }
+}
+
+function downloadAllBatchResults() {
+  if (!batchExportResults.length) return;
+  batchExportResults.forEach((res, idx) => {
+    setTimeout(() => {
+      downloadBlob(res.blob, res.filename);
+    }, idx * 220);
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -915,19 +1513,26 @@ export function setupStateSubscription() {
 export function setupEventListeners() {
   if (typeof document === 'undefined') return;
 
-  // Photo inputs
+  // Photo inputs (Single or Multiple)
   el.fileInput?.addEventListener('change', (e) => {
-    const file = e.target.files?.[0];
+    const files = e.target.files ? Array.from(e.target.files) : [];
     e.target.value = '';
-    if (file) handleImageFile(file);
+    if (files.length) handleImageFiles(files, { append: false });
+  });
+  el.addFilesInput?.addEventListener('change', (e) => {
+    const files = e.target.files ? Array.from(e.target.files) : [];
+    e.target.value = '';
+    if (files.length) handleImageFiles(files, { append: true });
   });
   el.cameraInput?.addEventListener('change', (e) => {
     const file = e.target.files?.[0];
     e.target.value = '';
-    if (file) handleImageFile(file, { fromCamera: true });
+    if (file) handleImageFiles([file], { fromCamera: true, append: batchItems.length > 0 });
   });
   el.albumBtn?.addEventListener('click', () => el.fileInput?.click());
   el.replaceBtn?.addEventListener('click', () => el.fileInput?.click());
+  el.addImagesBtn?.addEventListener('click', () => el.addFilesInput?.click());
+  el.rerollBatchBtn?.addEventListener('click', () => rerollBatchSchedule());
   el.rotateBtn?.addEventListener('click', rotateImage);
   el.cameraBtn?.addEventListener('click', () => el.cameraInput?.click());
 
@@ -941,9 +1546,13 @@ export function setupEventListeners() {
       minutes: Number(chip.dataset.shiftMinutes || 0)
     }));
   });
+  el.randomStepBtn?.addEventListener('click', stepRandomTimeAndCoord);
   el.exifTimeBtn?.addEventListener('click', () => {
     const d = getState().exifData?.dateTime;
-    if (d) setCustomDateTime(d);
+    if (d) {
+      setCustomDateTime(d);
+      propagateDateTimeAcrossBatch(d);
+    }
   });
 
   // Coordinates
@@ -983,6 +1592,7 @@ export function setupEventListeners() {
   el.addressInput?.addEventListener('input', (e) => {
     addressToken++;
     setManualAddress(e.target.value);
+    syncAddressAcrossBatch(e.target.value);
   });
   el.resetAddressBtn?.addEventListener('click', () => {
     unlockAddress();
@@ -992,6 +1602,12 @@ export function setupEventListeners() {
   // Export
   el.exportBtn?.addEventListener('click', runExport);
   el.shareBtn?.addEventListener('click', shareExport);
+  el.downloadBtn?.addEventListener('click', (e) => {
+    if (batchExportResults.length > 1) {
+      e.preventDefault();
+      downloadAllBatchResults();
+    }
+  });
 
   // Sheets: close button + tap on backdrop
   document.querySelectorAll('dialog.sheet').forEach((dialog) => {
@@ -1004,8 +1620,13 @@ export function setupEventListeners() {
   // Reset all
   el.resetAllBtn?.addEventListener('click', () => {
     if (getState().image && !confirm('ล้างรูปและค่าทั้งหมด?')) return;
+    disposeBatchThumbnails(batchItems);
+    batchItems = [];
+    activeBatchIndex = 0;
+    cleanupBatchExportUrls();
     resetDefaults();
     hideBanner();
+    renderBatchStrip();
     if (el.exifTimeBtn) el.exifTimeBtn.hidden = true;
     const state = getState();
     setLocation(state.lat, state.lon, 'default');
@@ -1036,6 +1657,7 @@ export async function init() {
   renderCoordsSource(remembered ? 'last' : 'default');
   if (el.placeholder) el.placeholder.hidden = !!state.image;
   if (el.rotateBtn) el.rotateBtn.disabled = !state.image;
+  renderBatchStrip();
 
   if (document.getElementById('map')) {
     initMap('map', { lat: state.lat, lon: state.lon, zoom: 15 }, ({ lat, lon, source }) => {

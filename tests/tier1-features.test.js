@@ -1120,3 +1120,64 @@ describe('F22: Comprehensive E2E Test Suite', () => {
     assertMatch(code, /--tier=/, '[F22] Test runner must support --tier flag');
   });
 });
+
+
+// =========================================================================
+// Feature 23: Multi-Photo Batch Mode (2-5 Min Time Step & 5-10m Coord Jitter)
+// =========================================================================
+describe('F23: Multi-Photo Batch Mode (2-5 Min Time Step & 5-10m Coordinate Jitter)', () => {
+  test('T1.23.1: jitterCoordinate shifts coordinates strictly within 5-10 meters', async () => {
+    const { module: presetMod } = await loadModule('presets.js');
+    const base = { lat: 6.499413, lon: 101.267206 };
+    let last = null;
+    for (let i = 0; i < 300; i++) {
+      const p = presetMod.jitterCoordinate(base.lat, base.lon, { avoid: last });
+      const d = presetMod.distanceMeters(base.lat, base.lon, p.lat, p.lon);
+      assertBetween(d, 4.9, 10.1, `Offset ${d.toFixed(2)} m must be within 5-10 m`);
+      assert(!last || p.lat !== last.lat || p.lon !== last.lon, 'Must not repeat previous point');
+      last = p;
+    }
+  });
+
+  test('T1.23.2: randomBatchTimeStepSeconds returns 120-300 seconds (2-5 minutes) and varies seconds', async () => {
+    const { module: presetMod } = await loadModule('presets.js');
+    assert(typeof presetMod.randomBatchTimeStepSeconds === 'function', 'randomBatchTimeStepSeconds must be exported');
+    let prevDate = new Date(2026, 9, 28, 21, 12, 7);
+    for (let i = 0; i < 200; i++) {
+      const stepSec = presetMod.randomBatchTimeStepSeconds({ prevDate });
+      assertBetween(stepSec, 120, 300, `Step ${stepSec}s must be between 120s (2 min) and 300s (5 min)`);
+      const nextDate = new Date(prevDate.getTime() + stepSec * 1000);
+      assert(nextDate.getSeconds() !== prevDate.getSeconds(), 'Consecutive photo seconds (:ss) should not repeat');
+      prevDate = nextDate;
+    }
+  });
+
+  test('T1.23.3: generateBatchSchedule creates sequential 2-5 min timestamps and 5-10 m coordinate steps', async () => {
+    const { module: presetMod } = await loadModule('presets.js');
+    assert(typeof presetMod.generateBatchSchedule === 'function', 'generateBatchSchedule must be exported');
+    const start = new Date(2026, 9, 28, 21, 12, 7);
+    const schedule = presetMod.generateBatchSchedule(6, start, 6.499413, 101.267206);
+    assertEqual(schedule.length, 6, 'Must generate 6 items');
+    assertEqual(schedule[0].dateTime.getTime(), start.getTime(), 'Photo #1 starts at base dateTime');
+
+    for (let i = 1; i < schedule.length; i++) {
+      const prev = schedule[i - 1];
+      const curr = schedule[i];
+      const diffSec = (curr.dateTime.getTime() - prev.dateTime.getTime()) / 1000;
+      assertBetween(diffSec, 120, 300, `Photo #${i + 1} time gap (${diffSec}s) must be 2-5 minutes`);
+      const dist = presetMod.distanceMeters(prev.lat, prev.lon, curr.lat, curr.lon);
+      assertBetween(dist, 4.9, 10.1, `Photo #${i + 1} distance from previous (${dist.toFixed(2)}m) must be 5-10 meters`);
+    }
+  });
+
+  test('T1.23.4: HTML supports multi-file selection, batch strip controls, and batch result gallery', () => {
+    const indexPath = path.join(PROJECT_ROOT, 'index.html');
+    const html = fs.readFileSync(indexPath, 'utf-8');
+    assertMatch(html, /id=["']file-input["'][^>]*multiple/i, 'file-input must have multiple attribute');
+    assertMatch(html, /id=["']batch-bar["']/i, 'batch-bar container must exist');
+    assertMatch(html, /id=["']btn-reroll-batch["']/i, 'btn-reroll-batch must exist');
+    assertMatch(html, /id=["']btn-add-images["']/i, 'btn-add-images must exist');
+    assertMatch(html, /id=["']btn-random-step["']/i, 'btn-random-step must exist');
+    assertMatch(html, /id=["']result-batch-grid["']/i, 'result-batch-grid must exist');
+  });
+});

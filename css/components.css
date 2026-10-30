@@ -685,3 +685,189 @@
   opacity: 0;
   transform: translateY(8px);
 }
+
+
+/* ---------- Multi-photo batch strip ---------- */
+.batch-bar {
+  display: grid;
+  gap: var(--s-2);
+  padding: var(--s-3);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+}
+
+.batch-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+}
+
+.batch-info {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  min-width: 0;
+}
+
+.batch-summary-text {
+  color: var(--text-2);
+  font-size: var(--fs-meta);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.batch-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+}
+
+.batch-list {
+  display: flex;
+  gap: var(--s-2);
+  overflow-x: auto;
+  padding-bottom: var(--s-1);
+  scrollbar-width: thin;
+}
+
+.batch-item {
+  position: relative;
+  flex: 0 0 112px;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface-2);
+  border: 2px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  overflow: hidden;
+  transition: border-color var(--ease), background-color var(--ease);
+}
+
+.batch-item.is-active {
+  border-color: var(--accent);
+  background: var(--surface-3);
+}
+
+.batch-select {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  text-align: left;
+}
+
+.batch-thumb {
+  width: 100%;
+  height: 68px;
+  object-fit: cover;
+  background: #000;
+}
+
+.batch-meta {
+  display: grid;
+  gap: 1px;
+  padding: var(--s-1) var(--s-2);
+  font-size: 11px;
+  line-height: 1.3;
+}
+
+.batch-meta-time {
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.batch-meta-offset {
+  color: var(--text-3);
+  font-size: 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.batch-badge {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  padding: 1px 6px;
+  background: rgba(15, 17, 21, 0.82);
+  border-radius: var(--r-pill);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  pointer-events: none;
+}
+
+.batch-remove {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  background: rgba(15, 17, 21, 0.82);
+  border: 1px solid var(--border-strong);
+  border-radius: 50%;
+  color: var(--text-2);
+  font-size: 11px;
+  line-height: 1;
+}
+
+.batch-remove:hover {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+/* ---------- Result batch gallery ---------- */
+.result-batch-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: var(--s-2);
+  max-height: 52vh;
+  overflow-y: auto;
+  padding: var(--s-1);
+}
+
+.result-batch-card {
+  display: grid;
+  gap: var(--s-1);
+  padding: var(--s-2);
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+}
+
+.result-batch-img {
+  width: 100%;
+  height: 110px;
+  object-fit: contain;
+  background: #000;
+  border-radius: 4px;
+  -webkit-touch-callout: default;
+  -webkit-user-select: auto;
+  user-select: auto;
+}
+
+.result-batch-caption {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-1);
+  font-size: 11px;
+  color: var(--text-2);
+}
+
+.result-batch-dl {
+  color: var(--accent);
+  font-size: 11px;
+  text-decoration: underline;
+}

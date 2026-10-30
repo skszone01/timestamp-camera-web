@@ -8,7 +8,7 @@
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="Timestamp">
-  <meta name="description" content="ประทับวันเวลา พิกัด และอำเภอ/จังหวัด ลงบนรูปภาพ ทำงานในเครื่อง 100% ไม่อัปโหลดรูป">
+  <meta name="description" content="ประทับวันเวลา พิกัด และอำเภอ/จังหวัด ลงบนรูปภาพ รองรับหลายภาพพร้อมสุ่มเวลาและพิกัด ทำงานในเครื่อง 100%">
   <title>Timestamp Camera</title>
 
   <link rel="icon" type="image/svg+xml" href="assets/icons/favicon.svg">
@@ -43,14 +43,29 @@
           <canvas id="preview-canvas" class="preview-canvas" width="1280" height="960"></canvas>
 
           <div id="viewfinder-placeholder" class="empty-state">
-            <p class="empty-title">เลือกรูปเพื่อประทับเวลาและพิกัด</p>
-            <p class="empty-desc">ถ้ารูปมีพิกัด GPS ระบบจะดึงพิกัด อำเภอ และจังหวัดให้อัตโนมัติ</p>
+            <p class="empty-title">เลือกรูปเพื่อประทับเวลาและพิกัด (เลือกได้หลายรูป)</p>
+            <p class="empty-desc">เมื่อเลือกหลายรูป ระบบจะสุ่มเวลาห่างกัน 2–5 นาที และสุ่มพิกัดห่างกัน 5–10 เมตรต่อภาพให้อัตโนมัติ</p>
             <div class="empty-actions">
-              <button type="button" id="btn-album" class="btn btn-primary">เลือกรูปจากเครื่อง</button>
+              <button type="button" id="btn-album" class="btn btn-primary">เลือกรูปจากเครื่อง (หลายรูปได้)</button>
               <button type="button" id="btn-camera" class="btn btn-secondary camera-btn" aria-label="Take Photo">ถ่ายรูปใหม่</button>
             </div>
             <p class="empty-note">รูปไม่ถูกอัปโหลด ประมวลผลในเครื่องทั้งหมด</p>
           </div>
+        </div>
+
+        <!-- Multi-photo batch strip & randomizer controls -->
+        <div id="batch-bar" class="batch-bar" hidden>
+          <div class="batch-head">
+            <div class="batch-info">
+              <span id="batch-count-badge" class="tag is-accent">1 ภาพ</span>
+              <span id="batch-summary" class="batch-summary-text">สุ่มเวลา +2–5 นาที · พิกัด 5–10 ม. ต่อภาพ</span>
+            </div>
+            <div class="batch-actions">
+              <button type="button" id="btn-reroll-batch" class="btn btn-secondary btn-sm" title="สุ่มเวลาห่าง 2–5 นาที และพิกัดห่าง 5–10 เมตร ใหม่">🎲 สุ่มเวลา/พิกัดใหม่</button>
+              <button type="button" id="btn-add-images" class="btn btn-secondary btn-sm" title="เพิ่มรูปภาพเข้าชุดนี้">+ เพิ่มรูป</button>
+            </div>
+          </div>
+          <div id="batch-list" class="batch-list" role="tablist" aria-label="รายการรูปภาพที่เลือก"></div>
         </div>
 
         <div id="gps-banner" class="banner" role="status" hidden>
@@ -77,7 +92,7 @@
 
           <div class="field-row">
             <div class="field grow">
-              <label for="datetime-input" class="field-label">วันที่และเวลา</label>
+              <label for="datetime-input" class="field-label">วันที่และเวลา (ภาพเริ่มต้น / ภาพที่เลือก)</label>
               <input type="datetime-local" id="datetime-input" class="input">
             </div>
             <div class="field seconds">
@@ -91,6 +106,7 @@
             <button type="button" class="chip" data-shift-minutes="-60">−1 ชม.</button>
             <button type="button" class="chip" data-shift-minutes="60">+1 ชม.</button>
             <button type="button" class="chip" data-shift-days="1">+1 วัน</button>
+            <button type="button" id="btn-random-step" class="chip chip-accent" title="สุ่มขยับเวลาไปข้างหน้า 2–5 นาที และขยับพิกัด 5–10 เมตร">🎲 +2–5 นาที &amp; 5–10 ม.</button>
             <button type="button" id="btn-exif-time" class="chip chip-accent" hidden>ใช้เวลาในรูป</button>
           </div>
         </div>
@@ -160,7 +176,7 @@
 
     <!-- Sticky actions -->
     <footer class="actionbar">
-      <button type="button" id="btn-replace-image" class="btn btn-secondary">เปลี่ยนรูป</button>
+      <button type="button" id="btn-replace-image" class="btn btn-secondary">เลือกรูปใหม่</button>
       <button type="button" id="btn-rotate" class="btn btn-secondary btn-icon" aria-label="หมุนรูป 90 องศา" title="หมุนรูป 90°" disabled>
         <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <path d="M20 11a8 8 0 1 1-2.34-5.66"/><path d="M20 4v5h-5"/>
@@ -187,6 +203,7 @@
         <button type="button" class="btn btn-ghost btn-sm" data-close>ปิด</button>
       </div>
       <img id="result-image" class="result-image" alt="ภาพที่ประทับเวลาแล้ว">
+      <div id="result-batch-grid" class="result-batch-grid" hidden></div>
       <p class="hint" id="result-hint">iPhone: กดแชร์ แล้วเลือก "บันทึกภาพ" · หรือกดค้างที่รูป</p>
       <div class="btn-row">
         <button type="button" id="btn-share" class="btn btn-primary grow">แชร์ / บันทึกลงอัลบั้ม</button>
@@ -194,7 +211,8 @@
       </div>
     </dialog>
 
-    <input type="file" id="file-input" class="visually-hidden" accept="image/*" aria-label="เลือกรูป">
+    <input type="file" id="file-input" class="visually-hidden" accept="image/*" multiple aria-label="เลือกรูป">
+    <input type="file" id="add-files-input" class="visually-hidden" accept="image/*" multiple aria-label="เพิ่มรูป">
     <input type="file" id="camera-input" class="visually-hidden" accept="image/*" capture="environment" aria-label="ถ่ายรูป">
 
     <div id="toast-container" class="toast-container" aria-live="polite"></div>

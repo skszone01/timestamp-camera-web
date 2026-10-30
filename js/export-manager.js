@@ -7,11 +7,11 @@
  * 1. Full-Resolution Export:
  *    - Delegates high-fidelity rendering to js/watermark-engine.js (exportFullResolution).
  *    - Preserves 100% original camera sensor resolution (up to 48MP/8192px GPU ceiling).
- * 2. Web Share API Pipeline (Mobile Direct Camera Roll Saving):
- *    - Checks navigator.canShare({ files: [file] }).
- *    - Packages JPEG Blob into a native File object.
+ * 2. Web Share API Pipeline (Mobile Direct Camera Roll Saving - Single & Multi-Photo Batch):
+ *    - Checks navigator.canShare({ files }).
+ *    - Packages JPEG Blob(s) into native File object(s).
  *    - Invokes native OS Share Sheet on iOS Safari and Android Chrome, enabling direct
- *      1-tap "Save to Photos" / "Save Image" to local camera roll without extra dialogs.
+ *      1-tap "Save to Photos" / "Save N Images" to local camera roll without extra dialogs.
  * 3. Desktop Fallback Download:
  *    - Standard dynamic <a> anchor tag trigger with blob URL and automatic memory revocation.
  * 4. Standardized Timestamped Naming:
@@ -52,7 +52,7 @@ export function generateExportFilename(originalFilename = '', date = new Date())
  * Checks whether the Web Share API is available and capable of sharing image files
  * in the current browser runtime environment.
  * 
- * @param {File} [testFile] - Optional File instance to test
+ * @param {File|File[]} [testFile] - Optional File or array of Files to test
  * @returns {boolean} True if navigator.canShare({ files }) is supported
  */
 export function canUseWebShare(testFile = null) {
@@ -64,6 +64,10 @@ export function canUseWebShare(testFile = null) {
   }
 
   try {
+    if (Array.isArray(testFile)) {
+      if (!testFile.length) return false;
+      return navigator.canShare({ files: testFile });
+    }
     const file = testFile || (typeof File !== 'undefined' ? new File([], 'test.jpg', { type: 'image/jpeg' }) : null);
     if (!file) return false;
     return navigator.canShare({ files: [file] });
@@ -134,21 +138,24 @@ export function downloadBlob(blob, filename) {
 }
 
 /**
- * Attempts to share a generated image File using the Web Share API.
+ * Attempts to share one or more generated image Files using the Web Share API.
  * 
- * @param {File} file - JPEG File object
+ * @param {File|File[]} fileOrFiles - JPEG File object or array of File objects
  * @param {string} [title='Timestamp Photo'] - Share sheet title
  * @returns {Promise<boolean>} True if shared successfully or user dismissed share dialog without error
  */
-export async function shareFile(file, title = 'Timestamp Photo') {
+export async function shareFile(fileOrFiles, title = 'Timestamp Photo') {
   if (typeof navigator === 'undefined' || !navigator.share) {
     return false;
   }
 
+  const files = Array.isArray(fileOrFiles) ? fileOrFiles : [fileOrFiles];
+  if (!files.length) return false;
+
   try {
     await navigator.share({
-      files: [file],
-      title: title
+      files,
+      title
     });
     return true;
   } catch (err) {
