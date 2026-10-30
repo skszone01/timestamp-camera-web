@@ -37,7 +37,7 @@ import { getDefaultPresets, getCustomPresets, saveCustomPreset, deleteCustomPres
 import { parseExif, readJpegSize } from './exif-parser.js';
 import { loadWatermarkFonts } from './font-loader.js';
 import { renderPreview, renderWatermark, exportFullResolution } from './watermark-engine.js';
-import { generateExportFilename, canUseWebShare, shareFile, downloadBlob } from './export-manager.js';
+import { generateExportFilename, canUseWebShare, shareFile, downloadBlob, getInAppBrowserName, isAppleMobile } from './export-manager.js';
 import { initMap, setMapCoordinates } from './map-picker.js';
 
 const LAST_LOCATION_KEY = 'tc_last_location';
@@ -726,16 +726,23 @@ async function runExport() {
     if (exportUrl) URL.revokeObjectURL(exportUrl);
     exportUrl = URL.createObjectURL(exportBlob);
 
-    el.resultImage.src = exportUrl;
+    const inApp = getInAppBrowserName();
+    // In-app browsers save a long-pressed image by re-fetching its URL natively, which a blob: URL can't serve
+    el.resultImage.src = inApp ? await blobToDataUrl(exportBlob) : exportUrl;
     el.downloadBtn.href = exportUrl;
     el.downloadBtn.download = exportFilename;
+    el.downloadBtn.hidden = !!inApp;
 
     const file = new File([exportBlob], exportFilename, { type: 'image/jpeg' });
     const shareable = canUseWebShare(file);
     el.shareBtn.hidden = !shareable;
-    el.resultHint.textContent = shareable
-      ? 'กด "แชร์ / บันทึกลงอัลบั้ม" แล้วเลือกบันทึกภาพ · หรือกดค้างที่รูป'
-      : 'กด "ดาวน์โหลดไฟล์" เพื่อบันทึกภาพ';
+    if (inApp) {
+      el.resultHint.textContent = getInAppSaveHint(inApp, shareable);
+    } else {
+      el.resultHint.textContent = shareable
+        ? 'กด "แชร์ / บันทึกลงอัลบั้ม" แล้วเลือกบันทึกภาพ · หรือกดค้างที่รูป'
+        : 'กด "ดาวน์โหลดไฟล์" เพื่อบันทึกภาพ';
+    }
     openSheet(el.resultSheet);
   } catch (err) {
     console.error('[App] Export failed:', err);
@@ -746,12 +753,36 @@ async function runExport() {
   }
 }
 
+function blobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
+}
+
+function getInAppSaveHint(appName, shareable) {
+  const openOutside = isAppleMobile()
+    ? 'กด ••• มุมขวาบน → "เปิดใน Safari"'
+    : 'กด ⋮ มุมขวาบน → "เปิดในเบราว์เซอร์/Chrome"';
+  const first = shareable ? 'กด "แชร์ / บันทึกลงอัลบั้ม" หรือ' : '';
+  return `เบราว์เซอร์ของ ${appName} ดาวน์โหลดไฟล์ไม่ได้ — ${first}กดค้างที่รูปแล้วเลือก "บันทึกรูปภาพ" · ถ้ายังไม่ได้ ${openOutside} แล้วทำใหม่`;
+}
+
 async function shareExport() {
   if (!exportBlob) return;
   const file = new File([exportBlob], exportFilename, { type: 'image/jpeg' });
   try {
     await shareFile(file, exportFilename);
   } catch (err) {
+    const inApp = getInAppBrowserName();
+    if (inApp) {
+      // Downloads don't work here either; point to long-press / open in a real browser
+      console.warn('[App] Share failed in in-app browser:', err);
+      showToast(getInAppSaveHint(inApp, false), 8000);
+      return;
+    }
     console.warn('[App] Share failed, downloading instead:', err);
     downloadBlob(exportBlob, exportFilename);
   }

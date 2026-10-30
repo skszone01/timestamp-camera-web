@@ -644,6 +644,10 @@
   object-fit: contain;
   background: #000;
   border-radius: var(--r-sm);
+  /* Keep the iOS long-press "Save image" menu available */
+  -webkit-touch-callout: default;
+  -webkit-user-select: auto;
+  user-select: auto;
 }
 
 /* ---------- Toast ---------- */

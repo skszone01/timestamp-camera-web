@@ -73,6 +73,33 @@ export function canUseWebShare(testFile = null) {
 }
 
 /**
+ * Detects in-app browsers (Facebook, Messenger, Instagram, LINE, ...) that ignore
+ * <a download> and blob downloads.
+ *
+ * @param {string} [ua] - User agent (defaults to navigator.userAgent)
+ * @returns {string|null} App name, or null for a regular browser
+ */
+export function getInAppBrowserName(ua = (typeof navigator !== 'undefined' ? navigator.userAgent : '')) {
+  const text = String(ua || '');
+  if (/FBAN\/Messenger|MessengerForiOS|Orca-Android/i.test(text)) return 'Messenger';
+  if (/FB_IAB|FBAN|FBAV|FBIOS|FB4A/i.test(text)) return 'Facebook';
+  if (/Instagram/i.test(text)) return 'Instagram';
+  if (/\bLine\//i.test(text)) return 'LINE';
+  if (/MicroMessenger/i.test(text)) return 'WeChat';
+  if (/TikTok|musical_ly|BytedanceWebview/i.test(text)) return 'TikTok';
+  return null;
+}
+
+/**
+ * @param {string} [ua] - User agent (defaults to navigator.userAgent)
+ * @returns {boolean} True on iPhone / iPad (including iPadOS reporting as Mac)
+ */
+export function isAppleMobile(ua = (typeof navigator !== 'undefined' ? navigator.userAgent : '')) {
+  if (/iPhone|iPad|iPod/i.test(ua)) return true;
+  return /Macintosh/i.test(ua) && typeof navigator !== 'undefined' && navigator.maxTouchPoints > 1;
+}
+
+/**
  * Triggers standard desktop browser download via dynamically appended <a> element.
  * 
  * @param {Blob} blob - Image blob to download
