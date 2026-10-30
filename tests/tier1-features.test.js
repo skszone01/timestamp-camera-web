@@ -973,6 +973,28 @@ describe('F20: Location Presets Management', () => {
       assert(presetMod.validatePresetInput(preset).valid, `Preset ${preset.id} must be valid`);
       assertEqual(preset.isDefault, true, `Preset ${preset.id} must be isDefault`);
     }
+    const ids = presetMod.getDefaultPresets().map(p => p.id);
+    assertEqual(new Set(ids).size, ids.length, 'Built-in preset ids must be unique');
+    assert(ids.length <= presetMod.PRESET_SLOT_COUNT, 'Built-in presets must fit the slot list');
+  });
+
+  test('T1.20.2b: jitterCoordinate moves a preset 5-15 m and never repeats the last point', async () => {
+    const { module: presetMod } = await loadModule('presets.js');
+    const base = { lat: 6.499413, lon: 101.267206 };
+    const toMeters = (p) => {
+      const dy = (p.lat - base.lat) * 111320;
+      const dx = (p.lon - base.lon) * 111320 * Math.cos(base.lat * Math.PI / 180);
+      return Math.hypot(dx, dy);
+    };
+    let last = null;
+    for (let i = 0; i < 500; i++) {
+      const p = presetMod.jitterCoordinate(base.lat, base.lon, { avoid: last });
+      const d = toMeters(p);
+      // 6-decimal rounding moves the point by up to ~0.08 m
+      assertBetween(d, 4.9, 15.1, `Offset ${d.toFixed(2)} m must be within 5-15 m`);
+      assert(!last || p.lat !== last.lat || p.lon !== last.lon, 'Must not repeat the previous point');
+      last = p;
+    }
   });
 
   test('T1.20.3: saveCustomPreset persists new user bookmark to localStorage', async () => {

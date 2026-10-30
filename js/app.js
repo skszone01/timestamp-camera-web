@@ -33,7 +33,7 @@ import {
 import { formatThaiBuddhistDate, toValidDate } from './thai-datetime.js';
 import { formatCoordinates, formatSignedComponent, isValidCoordinate, parseLocationInput, isShortMapUrl } from './coordinates.js';
 import { resolveThaiAddress, searchPlaces } from './geocoder.js';
-import { getDefaultPresets, getCustomPresets, saveCustomPreset, deleteCustomPreset, PRESET_SLOT_COUNT } from './presets.js';
+import { getDefaultPresets, getCustomPresets, saveCustomPreset, deleteCustomPreset, jitterCoordinate, PRESET_SLOT_COUNT } from './presets.js';
 import { parseExif, readJpegSize } from './exif-parser.js';
 import { loadWatermarkFonts } from './font-loader.js';
 import { renderPreview, renderWatermark, exportFullResolution } from './watermark-engine.js';
@@ -642,7 +642,7 @@ async function runPlaceSearch() {
   const q = query.toLowerCase();
   const saved = [...getDefaultPresets(), ...getCustomPresets()]
     .filter(p => p.name.toLowerCase().includes(q))
-    .map(p => ({ name: p.name, detail: p.address || 'พิกัดที่บันทึกไว้', lat: p.lat, lon: p.lon, address: p.address, saved: true }));
+    .map(p => ({ ...p, detail: p.address || 'พิกัดที่บันทึกไว้', saved: true }));
 
   el.placeSearchBtn?.classList.add('is-busy');
   setPlaceSearchStatus('กำลังค้นหา…');
@@ -690,7 +690,8 @@ async function runPlaceSearch() {
 function pickPlace(place) {
   clearPlaceResults();
   setPlaceSearchStatus(`เลือก: ${place.name}`);
-  setLocation(place.lat, place.lon, place.saved ? 'preset' : 'search', place.address ? { address: place.address } : {});
+  if (place.saved) applyPreset(place);
+  else setLocation(place.lat, place.lon, 'search');
 }
 
 // ---------------------------------------------------------------------------
@@ -731,8 +732,7 @@ export function renderPresetList() {
     meta.textContent = `${formatCoordinates(preset.lat, preset.lon)}${preset.address ? ` · ${preset.address}` : ''}`;
     pick.append(name, meta);
     pick.addEventListener('click', () => {
-      setLocation(preset.lat, preset.lon, 'preset', { address: preset.address });
-      updateState({ selectedPresetId: preset.id });
+      applyPreset(preset);
       closeSheet(el.presetsSheet);
     });
     li.appendChild(pick);
@@ -754,6 +754,16 @@ export function renderPresetList() {
 
     el.presetsList.appendChild(li);
   }
+}
+
+let lastPresetPoint = null;
+
+/** Uses a saved location, shifted a random 5–15 m so no two stamps share exact coordinates. */
+function applyPreset(preset) {
+  const point = jitterCoordinate(preset.lat, preset.lon, { avoid: lastPresetPoint });
+  lastPresetPoint = { lat: point.lat, lon: point.lon };
+  setLocation(point.lat, point.lon, 'preset', { address: preset.address });
+  updateState({ selectedPresetId: preset.id });
 }
 
 function createEmptyPresetSlot(slot) {

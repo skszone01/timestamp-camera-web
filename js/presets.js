@@ -15,7 +15,7 @@ export const PRESET_SLOT_COUNT = 10;
 
 /**
  * พิกัดใช้บ่อย (ฝังมากับเว็บ — ทุกเครื่องเห็นเหมือนกัน)
- * ช่อง 1 = ด่านพงยือไร ช่อง 2-10 ยังไม่มี เพิ่มต่อท้ายได้ตามรูปแบบนี้:
+ * ช่อง 1-7 ใช้แล้ว ช่อง 8-10 ยังว่าง เพิ่มต่อท้ายได้ตามรูปแบบนี้:
  *
  *   {
  *     id: 'preset_checkpoint_2',          // ไม่ซ้ำกัน
@@ -36,8 +36,88 @@ export const DEFAULT_PRESETS = Object.freeze([
     lon: 101.267206,
     address: 'อ.เมืองยะลา, จ.ยะลา',
     isDefault: true
+  },
+  {
+    id: 'preset_malayu_bangkok_17',
+    name: 'ซอย มลายูบางกอก 17',
+    lat: 6.504433,
+    lon: 101.263403,
+    address: 'อ.เมืองยะลา, จ.ยะลา',
+    isDefault: true
+  },
+  {
+    id: 'preset_yala_vocational',
+    name: 'วิทยาลัยอาชีวศึกษายะลา',
+    lat: 6.522497,
+    lon: 101.262465,
+    address: 'อ.เมืองยะลา, จ.ยะลา',
+    isDefault: true
+  },
+  {
+    id: 'preset_chinese_cemetery',
+    name: 'สุสานจีน',
+    lat: 6.501303,
+    lon: 101.272243,
+    address: 'อ.เมืองยะลา, จ.ยะลา',
+    isDefault: true
+  },
+  {
+    id: 'preset_yala_substation_1',
+    name: 'สถานีไฟฟ้าแรงสูงยะลา 1',
+    lat: 6.499275,
+    lon: 101.267271,
+    address: 'อ.เมืองยะลา, จ.ยะลา',
+    isDefault: true
+  },
+  {
+    id: 'preset_yala_substation_2',
+    name: 'สถานีไฟฟ้าแรงสูงยะลา 2',
+    lat: 6.476449,
+    lon: 101.265722,
+    address: 'อ.เมืองยะลา, จ.ยะลา',
+    isDefault: true
+  },
+  {
+    id: 'preset_sg_station',
+    name: 'ปั้มน้ำมัน SG',
+    lat: 6.494474,
+    lon: 101.265559,
+    address: 'อ.เมืองยะลา, จ.ยะลา',
+    isDefault: true
   }
 ]);
+
+/** ทุกครั้งที่เลือกพิกัดที่บันทึกไว้ จะเลื่อนพิกัดแบบสุ่มในระยะนี้ (เมตร) เพื่อไม่ให้ตัวเลขซ้ำกันทุกรูป */
+export const PRESET_JITTER_METERS = Object.freeze({ min: 5, max: 15 });
+
+const METERS_PER_DEGREE_LAT = 111320;
+
+/**
+ * Moves a coordinate a random 5–15 m (PRESET_JITTER_METERS) in a random direction,
+ * rounded to the 6 decimals shown on the stamp. Never returns the `avoid` point again.
+ *
+ * @param {number} lat
+ * @param {number} lon
+ * @param {{ random?: () => number, avoid?: { lat: number, lon: number } }} [options]
+ * @returns {{ lat: number, lon: number, meters: number }}
+ */
+export function jitterCoordinate(lat, lon, options = {}) {
+  const random = options.random || Math.random;
+  const { min, max } = PRESET_JITTER_METERS;
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const meters = min + random() * (max - min);
+    const bearing = random() * 2 * Math.PI;
+    const dLat = (meters * Math.cos(bearing)) / METERS_PER_DEGREE_LAT;
+    const dLon = (meters * Math.sin(bearing)) / (METERS_PER_DEGREE_LAT * Math.cos(lat * Math.PI / 180));
+    const next = {
+      lat: parseFloat((lat + dLat).toFixed(6)),
+      lon: parseFloat((lon + dLon).toFixed(6)),
+      meters
+    };
+    if (!options.avoid || next.lat !== options.avoid.lat || next.lon !== options.avoid.lon) return next;
+  }
+  return { lat, lon, meters: 0 };
+}
 
 const STORAGE_KEY = 'custom_location_presets';
 const LEGACY_STORAGE_KEY = 'timestamp_camera_presets_v1';
