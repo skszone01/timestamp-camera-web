@@ -143,6 +143,16 @@ export class MockContext2D {
     this.calls.push({ method: 'strokeRect', args: { x, y, w, h } });
   }
 
+  /** Right edge of a recorded fillText/strokeText call, whatever its textAlign. */
+  static rightEdge(call) {
+    const { text, x } = call.args;
+    const { textAlign, font } = call.state;
+    if (textAlign === 'right' || textAlign === 'end') return x;
+    const match = (font || '').match(/(\d+(?:\.\d+)?)px/);
+    const size = match ? parseFloat(match[1]) : 28;
+    return x + (text || '').length * (size * 0.55);
+  }
+
   fillText(text, x, y, maxWidth) {
     this.calls.push({
       method: 'fillText',

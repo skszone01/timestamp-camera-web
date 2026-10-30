@@ -60,11 +60,12 @@ describe('Tier 4: Realistic End-User Application Scenarios', () => {
     // 5. Verify visual layout metrics
     const fillCalls = ctx.getCalls('fillText');
     assertEqual(fillCalls.length, 3, 'Must render exactly 3 lines');
-    assertEqual(fillCalls[0].state.textAlign, 'right', 'Must be right-aligned');
     assertEqual(fillCalls[0].state.fillStyle, '#ffffff', 'Must have white fill');
 
-    // Verify right margin is ~35px (x = 1024 - 35 = 989)
-    assertBetween(fillCalls[0].args.x, 985, 995, 'Right margin must terminate at ~989px');
+    // Verify every line is right-aligned with a ~35px margin (right edge = 1024 - 35 = 989)
+    for (const call of fillCalls) {
+      assertBetween(MockContext2D.rightEdge(call), 985, 995, 'Right margin must terminate at ~989px');
+    }
   });
 
   // =========================================================================

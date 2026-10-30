@@ -172,6 +172,51 @@ export function disposeCanvas(canvas) {
   }
 }
 
+// Thai above/below vowels and tone marks take no horizontal space
+const ZERO_ADVANCE_MARKS = /[ัิ-ฺ็-๎]/g;
+
+/**
+ * Width of one line in the context's current font. Falls back to measuring the drawn ink
+ * when measureText reports an implausibly small width (seen with Thai on some WebKit builds).
+ *
+ * @param {CanvasRenderingContext2D} ctx
+ * @param {string} text
+ * @param {number} fontSize
+ * @returns {number}
+ */
+export function measureLineWidth(ctx, text, fontSize) {
+  if (!text) return 0;
+  const measured = typeof ctx.measureText === 'function' ? Number(ctx.measureText(text).width) || 0 : 0;
+  const advances = text.replace(ZERO_ADVANCE_MARKS, '').length;
+  if (measured >= advances * fontSize * 0.2) return measured;
+  return measureInkWidth(ctx.font, text, fontSize) || advances * fontSize * 0.5;
+}
+
+/** Rightmost painted pixel of the text drawn left-aligned on a scratch canvas. */
+function measureInkWidth(font, text, fontSize) {
+  if (typeof document === 'undefined' || !document.createElement) return 0;
+  const pad = Math.ceil(fontSize);
+  const width = Math.ceil(text.length * fontSize) + pad * 2;
+  const height = Math.ceil(fontSize * 2);
+  const scratch = document.createElement('canvas');
+  scratch.width = width;
+  scratch.height = height;
+  const c = scratch.getContext('2d', { willReadFrequently: true });
+  if (!c) return 0;
+  c.font = font;
+  c.textAlign = 'left';
+  c.textBaseline = 'alphabetic';
+  c.fillStyle = '#000';
+  c.fillText(text, pad, Math.round(fontSize * 1.4));
+  const data = c.getImageData(0, 0, width, height).data;
+  for (let x = width - 1; x >= 0; x--) {
+    for (let y = 0; y < height; y++) {
+      if (data[(y * width + x) * 4 + 3]) return x + 1 - pad;
+    }
+  }
+  return 0;
+}
+
 /**
  * Renders the pixel-faithful 3-line Timestamp Camera watermark onto a 2D canvas context.
  * Uses a two-pass pipeline (Pass 1 dark stroke with shadow, Pass 2 pure white core).
@@ -198,32 +243,50 @@ export function renderWatermark(ctx, width, height, data = {}, options = {}) {
   const line2Text = String(d.coordsStr || d.coordText || d.coordinates || '').trim();
   const line3Text = String(d.addressStr || d.addressText || d.address || '').trim();
 
-  // Baseline coordinates calculated upwards from bottom-right
-  const x = w - metrics.marginRight;
-  const y3 = h - metrics.marginBottom;
-  const y2 = y3 - metrics.lineHeight;
-  const y1 = y2 - metrics.lineHeight;
-
-  // Ordered sequence of lines
-  const lines = [
-    { text: line1Text, y: y1 },
-    { text: line2Text, y: y2 },
-    { text: line3Text, y: y3 }
-  ];
-
   ctx.save();
 
   // Typography configuration
   const fontFamily = opts.fontFamily || WATERMARK_FONT_FALLBACK_STACK;
-  ctx.font = `${opts.fontWeight || WATERMARK_RATIOS.FONT_WEIGHT} ${metrics.fontSize}px ${fontFamily}`;
-  ctx.textAlign = 'right';
+  const fontWeight = opts.fontWeight || WATERMARK_RATIOS.FONT_WEIGHT;
+  ctx.font = `${fontWeight} ${metrics.fontSize}px ${fontFamily}`;
   ctx.textBaseline = 'alphabetic';
+  // Right alignment is done by hand: some WebKit builds (iPad, in-app browsers) mis-place
+  // Thai text with textAlign = 'right' and push it past the right edge
+  ctx.textAlign = 'left';
+
+  const right = w - metrics.marginRight;
+  let fontSize = metrics.fontSize;
+  let lineHeight = metrics.lineHeight;
+  let widths = [line1Text, line2Text, line3Text].map(t => measureLineWidth(ctx, t, fontSize));
+
+  // Narrow frames (tall portrait, long address): shrink so the widest line keeps a left margin too
+  const available = w - metrics.marginRight * 2;
+  const widest = Math.max(...widths);
+  if (widest > available) {
+    const fit = available / widest;
+    fontSize = Math.max(WATERMARK_RATIOS.MIN_FONT_SIZE, Math.floor(fontSize * fit));
+    lineHeight = Math.round(fontSize * WATERMARK_RATIOS.LINE_HEIGHT);
+    ctx.font = `${fontWeight} ${fontSize}px ${fontFamily}`;
+    widths = [line1Text, line2Text, line3Text].map(t => measureLineWidth(ctx, t, fontSize));
+  }
+
+  // Baseline coordinates calculated upwards from bottom-right
+  const y3 = h - metrics.marginBottom;
+  const y2 = y3 - lineHeight;
+  const y1 = y2 - lineHeight;
+
+  // Ordered sequence of lines
+  const lines = [
+    { text: line1Text, x: right - widths[0], y: y1 },
+    { text: line2Text, x: right - widths[1], y: y2 },
+    { text: line3Text, x: right - widths[2], y: y3 }
+  ];
 
   // -------------------------------------------------------------
   // Pass 1: Stroked outline + ambient drop shadow
   // -------------------------------------------------------------
   ctx.strokeStyle = opts.strokeColor || 'rgba(0, 0, 0, 0.55)';
-  ctx.lineWidth = metrics.strokeWidth;
+  ctx.lineWidth = metrics.strokeWidth * (fontSize / metrics.fontSize);
   ctx.lineJoin = 'round';
   ctx.lineCap = 'round';
   ctx.miterLimit = 2;
@@ -235,7 +298,7 @@ export function renderWatermark(ctx, width, height, data = {}, options = {}) {
 
   for (const line of lines) {
     if (line.text) {
-      ctx.strokeText(line.text, x, line.y);
+      ctx.strokeText(line.text, line.x, line.y);
     }
   }
 
@@ -250,7 +313,7 @@ export function renderWatermark(ctx, width, height, data = {}, options = {}) {
 
   for (const line of lines) {
     if (line.text) {
-      ctx.fillText(line.text, x, line.y);
+      ctx.fillText(line.text, line.x, line.y);
     }
   }
 

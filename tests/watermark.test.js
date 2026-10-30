@@ -291,7 +291,7 @@ describe('Dual-Canvas Pipeline & Memory Management', () => {
 // Suite 4: Two-Pass Canvas Watermark Rendering
 // =========================================================================
 describe('Two-Pass Canvas Watermark Rendering', () => {
-  test('renderWatermark: Uses right text alignment (ctx.textAlign = "right")', () => {
+  test('renderWatermark: Right-aligns every line on the same edge', () => {
     const canvas = new MockCanvas(1024, 768);
     const ctx = canvas.getContext('2d');
     renderWatermark(ctx, 1024, 768, {
@@ -302,7 +302,8 @@ describe('Two-Pass Canvas Watermark Rendering', () => {
 
     const fillCalls = ctx.getCalls('fillText');
     assertEqual(fillCalls.length, 3, 'Must render exactly 3 lines');
-    assertEqual(fillCalls[0].state.textAlign, 'right', 'Text alignment must be right');
+    const edges = fillCalls.map(c => MockContext2D.rightEdge(c));
+    assert(edges.every(e => Math.abs(e - edges[0]) < 0.5), 'All lines must end on the same right edge');
   });
 
   test('renderWatermark: Pass 1 renders dark strokeText with ambient drop shadow', () => {

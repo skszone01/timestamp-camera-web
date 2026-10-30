@@ -525,7 +525,7 @@ describe('F11: Bundled Thai Sans-Serif Font', () => {
 // Feature 12: Watermark Visual Styling (M2-CANVAS / R5)
 // =========================================================================
 describe('F12: Watermark Visual Styling', () => {
-  test('T1.12.1: Canvas text alignment must be set to right (ctx.textAlign = "right")', async () => {
+  test('T1.12.1: All lines end at the same right edge (w - marginRight)', async () => {
     const { module: wmMod } = await loadModule('watermark-engine.js');
     assert(wmMod, '[F12] js/watermark-engine.js must exist');
     assert(typeof wmMod.renderWatermark === 'function', 'renderWatermark must be exported');
@@ -538,7 +538,10 @@ describe('F12: Watermark Visual Styling', () => {
     });
     const fillCalls = ctx.getCalls('fillText');
     assert(fillCalls.length >= 3, 'Must render at least 3 text lines');
-    assertEqual(fillCalls[0].state.textAlign, 'right', 'Text alignment must be right');
+    const right = 1024 - wmMod.calculateWatermarkMetrics(1024, 768).marginRight;
+    for (const call of fillCalls) {
+      assertBetween(MockContext2D.rightEdge(call), right - 0.5, right + 0.5, `"${call.args.text}" must end at x=${right}`);
+    }
   });
 
   test('T1.12.2: Pass 1 renders dark strokeText with drop shadow for legibility', async () => {
