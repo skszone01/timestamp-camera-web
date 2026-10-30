@@ -15,7 +15,7 @@ export const PRESET_SLOT_COUNT = 10;
 
 /**
  * พิกัดใช้บ่อย (ฝังมากับเว็บ — ทุกเครื่องเห็นเหมือนกัน)
- * ช่อง 1-7 ใช้แล้ว ช่อง 8-10 ยังว่าง เพิ่มต่อท้ายได้ตามรูปแบบนี้:
+ * ช่อง 1-9 ใช้แล้ว ช่อง 10 ยังว่าง เพิ่มต่อท้ายได้ตามรูปแบบนี้:
  *
  *   {
  *     id: 'preset_checkpoint_2',          // ไม่ซ้ำกัน
@@ -82,6 +82,22 @@ export const DEFAULT_PRESETS = Object.freeze([
     name: 'ปั้มน้ำมัน SG',
     lat: 6.494474,
     lon: 101.265559,
+    address: 'อ.เมืองยะลา, จ.ยะลา',
+    isDefault: true
+  },
+  {
+    id: 'preset_culvert_1_paramitae',
+    name: 'ท่อลอด 1 (จากปารามีแต)',
+    lat: 6.498203,
+    lon: 101.282529,
+    address: 'อ.เมืองยะลา, จ.ยะลา',
+    isDefault: true
+  },
+  {
+    id: 'preset_culvert_2_paramitae',
+    name: 'ท่อลอด 2 (จากปารามีแต)',
+    lat: 6.498601,
+    lon: 101.281119,
     address: 'อ.เมืองยะลา, จ.ยะลา',
     isDefault: true
   }
