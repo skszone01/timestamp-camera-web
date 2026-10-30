@@ -106,6 +106,32 @@ export function applyCanvasTransform(ctx, orientation, srcWidth, srcHeight) {
 }
 
 /**
+ * Reads the stored (un-rotated) pixel size from a JPEG's SOF marker.
+ *
+ * @param {Blob} file
+ * @returns {Promise<{ width: number, height: number } | null>} null when not a JPEG or no SOF found
+ */
+export async function readJpegSize(file) {
+  if (!file || typeof file.slice !== 'function') return null;
+  const view = new DataView(await file.slice(0, 1024 * 1024).arrayBuffer());
+  if (view.byteLength < 4 || view.getUint16(0) !== 0xFFD8) return null;
+
+  let offset = 2;
+  while (offset + 9 <= view.byteLength) {
+    if (view.getUint8(offset) !== 0xFF) return null;
+    const marker = view.getUint8(offset + 1);
+    if (marker === 0xFF) { offset++; continue; } // fill byte
+    // SOF0–SOF15, excluding DHT (C4), JPG (C8) and DAC (CC)
+    if (marker >= 0xC0 && marker <= 0xCF && marker !== 0xC4 && marker !== 0xC8 && marker !== 0xCC) {
+      return { height: view.getUint16(offset + 5), width: view.getUint16(offset + 7) };
+    }
+    if (marker === 0xD9 || marker === 0xDA) return null; // EOI / start of scan
+    offset += 2 + view.getUint16(offset + 2);
+  }
+  return null;
+}
+
+/**
  * Parses EXIF date string ("YYYY:MM:DD HH:MM:SS") into a native JavaScript Date object.
  * 
  * @param {string} dateStr

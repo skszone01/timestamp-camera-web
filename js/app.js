@@ -34,7 +34,7 @@ import { formatThaiBuddhistDate, toValidDate } from './thai-datetime.js';
 import { formatCoordinates, formatSignedComponent, isValidCoordinate, parseLocationInput, isShortMapUrl } from './coordinates.js';
 import { resolveThaiAddress } from './geocoder.js';
 import { getDefaultPresets, getCustomPresets, saveCustomPreset, deleteCustomPreset, PRESET_SLOT_COUNT } from './presets.js';
-import { parseExif } from './exif-parser.js';
+import { parseExif, readJpegSize } from './exif-parser.js';
 import { loadWatermarkFonts } from './font-loader.js';
 import { renderPreview, renderWatermark, exportFullResolution } from './watermark-engine.js';
 import { generateExportFilename, canUseWebShare, shareFile, downloadBlob } from './export-manager.js';
@@ -65,6 +65,15 @@ let addressToken = 0;
 let exportBlob = null;
 let exportUrl = null;
 let exportFilename = '';
+let imageOrientation = 1;   // EXIF orientation the browser's decoder did NOT apply, so we draw it
+let userQuarterTurns = 0;   // Extra clockwise 90° turns from the rotate button
+
+// 2x1 JPEG tagged EXIF orientation 6: a decoder that honours the tag returns a 1x2 image
+const ORIENTATION_TEST_JPEG = '/9j/4AAQSkZJRgABAQAAAQABAAD/4QAiRXhpZgAATU0AKgAAAAgAAQESAAMAAAABAAYAAAAAAAD/2wBDAFA3PEY8MlBGQUZaVVBfeMiCeG5uePWvuZHI////////////////////////////////////////////////////2wBDAVVaWnhpeOuCguv/////////////////////////////////////////////////////////////////////////wAARCAABAAIDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwCKiiiszsP/2Q==';
+const decoderOrientsCache = {};
+
+// EXIF orientations as [mirrored][clockwise quarter turns] (mirror applied first, then the turn)
+const ORIENTATION_BY_TURNS = [[1, 6, 3, 8], [2, 7, 4, 5]];
 
 // ---------------------------------------------------------------------------
 // DOM
@@ -85,6 +94,7 @@ export function queryDOMElements() {
     albumBtn: $('btn-album'),
     cameraBtn: $('btn-camera'),
     replaceBtn: $('btn-replace-image'),
+    rotateBtn: $('btn-rotate'),
     resetAllBtn: $('btn-reset-all'),
 
     datetimeOutput: $('datetime-output'),
@@ -172,8 +182,7 @@ export function renderPreviewCanvas() {
   const data = getWatermarkData(state);
 
   if (state.image) {
-    // Decoded images are already upright (createImageBitmap from-image / browser auto-orient)
-    renderPreview(canvas, state.image, data, { orientation: 1 });
+    renderPreview(canvas, state.image, data, { orientation: getDrawOrientation() });
     return;
   }
 
@@ -454,15 +463,71 @@ function loadImageElement(file) {
   });
 }
 
+function decodeWith(method, file) {
+  return method === 'bitmap'
+    ? createImageBitmap(file, { imageOrientation: 'from-image' })
+    : loadImageElement(file);
+}
+
+/** @returns {Promise<{ image: ImageBitmap|HTMLImageElement, method: 'bitmap'|'img' }>} */
 async function decodeImage(file) {
   if (typeof createImageBitmap === 'function') {
     try {
-      return await createImageBitmap(file, { imageOrientation: 'from-image' });
+      return { image: await decodeWith('bitmap', file), method: 'bitmap' };
     } catch {
       // Fall through to <img> decoding (older Safari)
     }
   }
-  return loadImageElement(file);
+  return { image: await loadImageElement(file), method: 'img' };
+}
+
+/** Whether this browser's decoder already rotates JPEGs by their EXIF tag (varies by browser/version). */
+function decoderAppliesOrientation(method) {
+  if (!(method in decoderOrientsCache)) {
+    decoderOrientsCache[method] = (async () => {
+      try {
+        const bytes = Uint8Array.from(atob(ORIENTATION_TEST_JPEG), (c) => c.charCodeAt(0));
+        const img = await decodeWith(method, new Blob([bytes], { type: 'image/jpeg' }));
+        return (img.naturalWidth || img.width) === 1;
+      } catch {
+        return true;
+      }
+    })();
+  }
+  return decoderOrientsCache[method];
+}
+
+/**
+ * Finds the EXIF orientation still to be drawn on the decoded image: 1 when the browser
+ * already turned it upright, the EXIF value when it did not.
+ */
+async function findUnappliedOrientation(file, exifOrientation, decoded) {
+  if (!(exifOrientation > 1 && exifOrientation <= 8)) return 1;
+  // Only JPEG: HEIC/PNG/WebP orientation is handled by the browser itself
+  const raw = await readJpegSize(file).catch(() => null);
+  if (!raw) return 1;
+
+  if (exifOrientation >= 5 && raw.width !== raw.height) {
+    // A 90° tag swaps width/height, so the decoded shape shows whether it was applied
+    const width = decoded.image.naturalWidth || decoded.image.width;
+    const height = decoded.image.naturalHeight || decoded.image.height;
+    return (width > height) === (raw.width > raw.height) ? exifOrientation : 1;
+  }
+  return (await decoderAppliesOrientation(decoded.method)) ? 1 : exifOrientation;
+}
+
+function getDrawOrientation() {
+  for (const row of ORIENTATION_BY_TURNS) {
+    const turns = row.indexOf(imageOrientation);
+    if (turns >= 0) return row[(turns + userQuarterTurns) % 4];
+  }
+  return 1;
+}
+
+function rotateImage() {
+  if (!getState().image) return;
+  userQuarterTurns = (userQuarterTurns + 1) % 4;
+  scheduleRepaint();
 }
 
 /**
@@ -483,7 +548,9 @@ export async function handleImageFile(file, opts = {}) {
   }
 
   const exif = exifResult.status === 'fulfilled' ? exifResult.value : null;
-  setImage(imageResult.value, file, file.name || 'photo.jpg');
+  imageOrientation = await findUnappliedOrientation(file, exif?.orientation, imageResult.value);
+  userQuarterTurns = 0;
+  setImage(imageResult.value.image, file, file.name || 'photo.jpg');
 
   const exifDate = toValidDate(exif?.dateTime);
   updateState({
@@ -651,7 +718,7 @@ async function runExport() {
   el.exportBtn.textContent = 'กำลังสร้างภาพ…';
   try {
     exportBlob = await exportFullResolution(state.image, getWatermarkData(state), {
-      orientation: 1,
+      orientation: getDrawOrientation(),
       quality: 0.92,
       mimeType: 'image/jpeg'
     });
@@ -699,8 +766,9 @@ export function setupStateSubscription() {
     if (changedKeys.some(k => ['image', 'dateTime', 'lat', 'lon', 'address'].includes(k))) {
       scheduleRepaint();
     }
-    if (changedKeys.includes('image') && el.placeholder) {
-      el.placeholder.hidden = !!state.image;
+    if (changedKeys.includes('image')) {
+      if (el.placeholder) el.placeholder.hidden = !!state.image;
+      if (el.rotateBtn) el.rotateBtn.disabled = !state.image;
     }
     if (changedKeys.includes('dateTime')) syncDateTimeControls(state);
     if (changedKeys.includes('isLiveTime') && el.liveToggle) el.liveToggle.checked = state.isLiveTime;
@@ -725,6 +793,7 @@ export function setupEventListeners() {
   });
   el.albumBtn?.addEventListener('click', () => el.fileInput?.click());
   el.replaceBtn?.addEventListener('click', () => el.fileInput?.click());
+  el.rotateBtn?.addEventListener('click', rotateImage);
   el.cameraBtn?.addEventListener('click', () => el.cameraInput?.click());
 
   // Date & time
@@ -826,6 +895,7 @@ export async function init() {
   syncAddressControls(state, ['address', 'isAddressManual']);
   renderCoordsSource(remembered ? 'last' : 'default');
   if (el.placeholder) el.placeholder.hidden = !!state.image;
+  if (el.rotateBtn) el.rotateBtn.disabled = !state.image;
 
   if (document.getElementById('map')) {
     initMap('map', { lat: state.lat, lon: state.lon, zoom: 15 }, ({ lat, lon, source }) => {
