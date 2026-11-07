@@ -34,7 +34,7 @@ import {
 } from './state.js';
 
 import { formatThaiBuddhistDate, toValidDate } from './thai-datetime.js';
-import { formatCoordinates, formatSignedComponent, isValidCoordinate, parseLocationInput, isShortMapUrl } from './coordinates.js';
+import { formatCoordinates, formatSignedComponent, formatPlainLatLon, isValidCoordinate, parseLocationInput, isShortMapUrl } from './coordinates.js';
 import { resolveThaiAddress, searchPlaces } from './geocoder.js';
 import {
   getDefaultPresets,
@@ -74,6 +74,7 @@ const PROVIDER_LABELS = {
 
 let el = {};
 let clockInterval = null;
+let copyCoordsTimer = null;
 let repaintRequest = null;
 let addressToken = 0;
 let exportBlob = null;
@@ -137,6 +138,9 @@ export function queryDOMElements() {
     gpsBtn: $('btn-quick-gps'),
     latInput: $('lat-input'),
     lonInput: $('lon-input'),
+    btnCopyCoords: $('btn-copy-coords'),
+    btnCopyCoordsLabel: $('btn-copy-coords-label'),
+    copyCoordsPreview: $('copy-coords-preview'),
     mapLinkInput: $('map-link-input'),
     parseLinkBtn: $('btn-parse-link'),
     googleLink: $('link-google-maps'),
@@ -469,6 +473,9 @@ export function setLocation(lat, lon, source, opts = {}) {
 
   updateCoordinates(lat, lon, { skipAddressUpdate: hasPresetAddress });
   const state = getState();
+  if (el.copyCoordsPreview) {
+    el.copyCoordsPreview.textContent = formatPlainLatLon(state.lat, state.lon);
+  }
   setMapCoordinates(state.lat, state.lon, opts.zoom !== false, { silent: true });
   renderCoordsSource(source);
 
@@ -535,9 +542,103 @@ function syncLocationControls(state, changedKeys) {
     el.lonInput.value = formatSignedComponent(state.lon);
     el.lonInput.classList.remove('is-invalid');
   }
+  if (el.copyCoordsPreview && isValidCoordinate(state.lat, state.lon)) {
+    el.copyCoordsPreview.textContent = formatPlainLatLon(state.lat, state.lon);
+  }
   if (el.googleLink) {
     el.googleLink.href = `https://www.google.com/maps/search/?api=1&query=${state.lat},${state.lon}`;
   }
+}
+
+function getCurrentValidCoords() {
+  if (el.latInput && el.lonInput && (document.activeElement === el.latInput || document.activeElement === el.lonInput)) {
+    const inputLat = parseFloat(el.latInput.value.trim());
+    const inputLon = parseFloat(el.lonInput.value.trim());
+    if (isValidCoordinate(inputLat, inputLon)) {
+      return { lat: inputLat, lon: inputLon };
+    }
+  }
+  const state = getState();
+  if (isValidCoordinate(state.lat, state.lon)) {
+    return { lat: state.lat, lon: state.lon };
+  }
+  const active = batchItems[activeBatchIndex];
+  if (active && isValidCoordinate(active.lat, active.lon)) {
+    return { lat: active.lat, lon: active.lon };
+  }
+  const parsedLat = el.latInput ? parseFloat(el.latInput.value.trim()) : NaN;
+  const parsedLon = el.lonInput ? parseFloat(el.lonInput.value.trim()) : NaN;
+  return { lat: parsedLat, lon: parsedLon };
+}
+
+async function copyTextToClipboard(text) {
+  if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      // Fall through to textarea execCommand fallback (iOS Safari / mobile webviews)
+    }
+  }
+  if (typeof document === 'undefined' || !document.body) return false;
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.setAttribute('readonly', '');
+  textarea.style.position = 'fixed';
+  textarea.style.top = '0';
+  textarea.style.left = '0';
+  textarea.style.opacity = '0';
+  textarea.style.pointerEvents = 'none';
+  document.body.appendChild(textarea);
+  try {
+    textarea.focus();
+    textarea.select();
+    textarea.setSelectionRange(0, text.length);
+    return document.execCommand('copy');
+  } catch {
+    return false;
+  } finally {
+    textarea.remove();
+  }
+}
+
+export async function copyCoordinates() {
+  const { lat, lon } = getCurrentValidCoords();
+  if (!isValidCoordinate(lat, lon)) {
+    showToast('พิกัดไม่ถูกต้อง ไม่สามารถคัดลอกได้');
+    return '';
+  }
+  const text = formatPlainLatLon(lat, lon);
+  if (el.copyCoordsPreview) {
+    el.copyCoordsPreview.textContent = text;
+  }
+
+  await copyTextToClipboard(text);
+  showToast(`คัดลอกพิกัดแล้ว: ${text}`);
+
+  if (el.btnCopyCoordsLabel && !el.btnCopyCoordsLabel.dataset.defaultLabel && !el.btnCopyCoords?.classList.contains('is-copied')) {
+    el.btnCopyCoordsLabel.dataset.defaultLabel = el.btnCopyCoordsLabel.textContent || 'คัดลอกพิกัด';
+  }
+  if (el.btnCopyCoords) {
+    el.btnCopyCoords.classList.add('is-copied');
+  }
+  if (el.btnCopyCoordsLabel) {
+    el.btnCopyCoordsLabel.textContent = 'คัดลอกแล้ว ✓';
+  }
+  if (copyCoordsTimer) {
+    clearTimeout(copyCoordsTimer);
+  }
+  copyCoordsTimer = setTimeout(() => {
+    copyCoordsTimer = null;
+    if (el.btnCopyCoords) {
+      el.btnCopyCoords.classList.remove('is-copied');
+    }
+    if (el.btnCopyCoordsLabel) {
+      el.btnCopyCoordsLabel.textContent = el.btnCopyCoordsLabel.dataset.defaultLabel || 'คัดลอกพิกัด';
+    }
+  }, 1800);
+
+  return text;
 }
 
 function syncAddressControls(state, changedKeys) {
@@ -790,6 +891,9 @@ export function selectBatchItem(index) {
     setImage(item.image, item.file, item.name);
     setCustomDateTime(item.dateTime);
     updateCoordinates(item.lat, item.lon, { skipAddressUpdate: true });
+    if (el.copyCoordsPreview && isValidCoordinate(item.lat, item.lon)) {
+      el.copyCoordsPreview.textContent = formatPlainLatLon(item.lat, item.lon);
+    }
     if (item.address) setAddress(item.address, getState().isAddressManual);
     setMapCoordinates(item.lat, item.lon, false, { silent: true });
     renderCoordsSource(item.source || 'batch');
@@ -1565,10 +1669,26 @@ export function setupEventListeners() {
     const ok = isValidCoordinate(lat, lon);
     el.latInput.classList.toggle('is-invalid', !ok);
     el.lonInput.classList.toggle('is-invalid', !ok);
-    if (ok) setLocation(lat, lon, 'manual');
+    if (ok) {
+      setLocation(lat, lon, 'manual');
+      if (el.copyCoordsPreview) {
+        el.copyCoordsPreview.textContent = formatPlainLatLon(lat, lon);
+      }
+    }
+  };
+  const onCoordLiveInput = () => {
+    if (!el.copyCoordsPreview || !el.latInput || !el.lonInput) return;
+    const lat = parseFloat(el.latInput.value.trim());
+    const lon = parseFloat(el.lonInput.value.trim());
+    if (isValidCoordinate(lat, lon)) {
+      el.copyCoordsPreview.textContent = formatPlainLatLon(lat, lon);
+    }
   };
   el.latInput?.addEventListener('change', onCoordInput);
   el.lonInput?.addEventListener('change', onCoordInput);
+  el.latInput?.addEventListener('input', onCoordLiveInput);
+  el.lonInput?.addEventListener('input', onCoordLiveInput);
+  el.btnCopyCoords?.addEventListener('click', copyCoordinates);
 
   const onLinkSubmit = () => {
     if (applyLocationText(el.mapLinkInput.value, 'link')) el.mapLinkInput.value = '';

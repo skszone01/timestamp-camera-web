@@ -144,6 +144,17 @@
             </div>
           </div>
 
+          <div class="coords-copy-row">
+            <button type="button" id="btn-copy-coords" class="btn btn-secondary btn-copy-coords" title="คัดลอกพิกัด (ละติจูด, ลองจิจูด) สำหรับนำไปวางในแบบฟอร์ม">
+              <svg class="icon-copy" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+              </svg>
+              <span id="btn-copy-coords-label">คัดลอกพิกัด</span>
+              <code id="copy-coords-preview" class="coords-copy-preview mono">6.499413, 101.267206</code>
+            </button>
+          </div>
+
           <div id="map" class="map-container" aria-label="แผนที่เลือกพิกัด"></div>
           <p class="hint">แตะบนแผนที่หรือลากหมุดเพื่อเปลี่ยนพิกัด · สลับ Google ดาวเทียม ได้ที่มุมขวาบน</p>
 

@@ -871,3 +871,48 @@
   font-size: 11px;
   text-decoration: underline;
 }
+
+/* ---------- Copy Coordinates button row ---------- */
+.coords-copy-row {
+  display: flex;
+  width: 100%;
+}
+
+.btn-copy-coords {
+  width: 100%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 14px;
+  font-weight: 500;
+  transition: all 0.18s ease;
+}
+
+.btn-copy-coords .icon-copy {
+  flex-shrink: 0;
+  opacity: 0.9;
+}
+
+.coords-copy-preview {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.85em;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--accent, #f5b921);
+  letter-spacing: 0.02em;
+}
+
+.btn-copy-coords.is-copied {
+  border-color: rgba(52, 211, 153, 0.6);
+  background: rgba(52, 211, 153, 0.1);
+  color: #34d399;
+}
+
+.btn-copy-coords.is-copied .coords-copy-preview {
+  background: rgba(52, 211, 153, 0.15);
+  color: #34d399;
+}

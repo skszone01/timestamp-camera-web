@@ -52,6 +52,30 @@ export function formatCoordinates(lat, lon) {
 }
 
 /**
+ * Format decimal coordinates as plain unsigned-positive decimal pair with space after comma:
+ * "latitude, longitude" without leading '+' on positive values (e.g. "6.499458, 101.267187").
+ * Matches Google Form coordinate input format ("เช่น 6.54321, 101.23456").
+ *
+ * @param {number|string} lat - Latitude in degrees
+ * @param {number|string} lon - Longitude in degrees
+ * @param {number} [decimals=6] - Number of decimal places
+ * @returns {string} Formatted coordinate string or empty string if invalid
+ */
+export function formatPlainLatLon(lat, lon, decimals = 6) {
+  if (lat === null || lon === null || lat === '' || lon === '' || typeof lat === 'boolean' || typeof lon === 'boolean') {
+    return '';
+  }
+  const latNum = Number(lat);
+  const lonNum = Number(lon);
+  if (!Number.isFinite(latNum) || !Number.isFinite(lonNum)) {
+    return '';
+  }
+  return `${latNum.toFixed(decimals)}, ${lonNum.toFixed(decimals)}`;
+}
+
+export const formatCopyCoords = formatPlainLatLon;
+
+/**
  * Parses a decimal coordinate pair string in various spacing and sign formats:
  * - "+6.499413,+101.267206" (reference format)
  * - "6.499413, 101.267206" (comma + space)
