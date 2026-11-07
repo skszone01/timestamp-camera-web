@@ -108,10 +108,11 @@ export function isAppleMobile(ua = (typeof navigator !== 'undefined' ? navigator
  * 
  * @param {Blob} blob - Image blob to download
  * @param {string} filename - Target file name
+ * @returns {{ downloaded: boolean, filename: string }}
  */
 export function downloadBlob(blob, filename) {
   if (typeof document === 'undefined' || !document.createElement) {
-    return;
+    return { downloaded: true, filename };
   }
 
   const url = (typeof URL !== 'undefined' && URL.createObjectURL)
@@ -135,6 +136,104 @@ export function downloadBlob(blob, filename) {
       URL.revokeObjectURL(url);
     }
   }, 500);
+
+  return { downloaded: true, filename };
+}
+
+/**
+ * Shares a single image Blob or File via the Web Share API.
+ *
+ * @param {Blob|File} blob - JPEG Blob or File to share
+ * @param {string} [filename] - Target filename
+ * @param {string} [title='Timestamp Photo'] - Share sheet title
+ * @returns {Promise<{ shared: boolean, filename?: string, cancelled?: boolean, error?: any }>}
+ */
+export async function shareImage(blob, filename, title = 'Timestamp Photo') {
+  const resolvedFilename = filename || (blob && typeof blob.name === 'string' && blob.name ? blob.name : generateExportFilename());
+
+  if (!blob) {
+    return { shared: false, error: new Error('Invalid image blob') };
+  }
+
+  if (typeof navigator === 'undefined' || typeof navigator.share !== 'function') {
+    return { shared: false, error: new Error('Web Share API is not supported') };
+  }
+
+  try {
+    const mimeType = (blob && blob.type) || 'image/jpeg';
+    const file = (typeof File !== 'undefined')
+      ? (blob instanceof File && blob.name === resolvedFilename ? blob : new File([blob], resolvedFilename, { type: mimeType }))
+      : blob;
+
+    if (typeof navigator.canShare === 'function' && !navigator.canShare({ files: [file] })) {
+      return { shared: false, error: new Error('Web Share API cannot share this file') };
+    }
+
+    await navigator.share({
+      files: [file],
+      title
+    });
+
+    return { shared: true, filename: resolvedFilename };
+  } catch (error) {
+    if (error && error.name === 'AbortError') {
+      return { shared: false, cancelled: true };
+    }
+    return { shared: false, error };
+  }
+}
+
+/**
+ * Shares multiple images in a single native OS Share Sheet invocation.
+ *
+ * @param {Array<{ blob?: Blob, file?: File, filename?: string, name?: string }|File|Blob>} items - Images to share
+ * @param {string} [title] - Optional share sheet title
+ * @returns {Promise<{ shared: boolean, count?: number, cancelled?: boolean, error?: any }>}
+ */
+export async function shareMultipleImages(items, title) {
+  if (!Array.isArray(items) || items.length === 0) {
+    return { shared: false, error: new Error('No images provided to share') };
+  }
+
+  if (typeof navigator === 'undefined' || typeof navigator.share !== 'function') {
+    return { shared: false, error: new Error('Web Share API is not supported') };
+  }
+
+  try {
+    const files = items.map((item, idx) => {
+      if (typeof File !== 'undefined' && item instanceof File) {
+        return item;
+      }
+      if (item && typeof File !== 'undefined' && item.file instanceof File) {
+        return item.file;
+      }
+      const blob = (item && item.blob !== undefined) ? item.blob : item;
+      const itemFilename = (item && (item.filename || item.name))
+        ? (item.filename || item.name)
+        : generateExportFilename('', new Date(Date.now() + idx * 1000));
+      const mimeType = (blob && blob.type) || 'image/jpeg';
+      return (typeof File !== 'undefined')
+        ? new File([blob], itemFilename, { type: mimeType })
+        : blob;
+    });
+
+    if (typeof navigator.canShare === 'function' && !navigator.canShare({ files })) {
+      return { shared: false, error: new Error('Web Share API cannot share multiple files') };
+    }
+
+    const shareTitle = title || `Timestamp Photos (${files.length})`;
+    await navigator.share({
+      files,
+      title: shareTitle
+    });
+
+    return { shared: true, count: files.length };
+  } catch (error) {
+    if (error && error.name === 'AbortError') {
+      return { shared: false, cancelled: true };
+    }
+    return { shared: false, error };
+  }
 }
 
 /**
@@ -174,8 +273,8 @@ export async function shareFile(fileOrFiles, title = 'Timestamp Photo') {
  *    allowing instant 1-tap "Save to Photos" / "Save Image".
  * 3. On desktop or unsupported platforms, triggers automatic file download.
  * 
- * @param {HTMLImageElement|ImageBitmap|File|Blob} imageSource - Source image
- * @param {object} watermarkData - { dateTimeStr, coordsStr, addressStr }
+ * @param {HTMLImageElement|ImageBitmap|File|Blob} imageSource - Source image (or pre-rendered Blob if watermarkData is a filename string)
+ * @param {object|string} watermarkData - { dateTimeStr, coordsStr, addressStr } or filename string
  * @param {object} [options={}]
  * @param {number} [options.orientation=1] - EXIF orientation tag (1-8)
  * @param {string} [options.filename=''] - Custom filename (defaults to timestamp_YYYYMMDD_HHmmss.jpg)
@@ -183,26 +282,35 @@ export async function shareFile(fileOrFiles, title = 'Timestamp Photo') {
  * @param {number} [options.quality=0.95] - JPEG quality compression factor (0.92 - 0.95)
  * @param {boolean} [options.forceDownload=false] - Force anchor download even if Web Share is supported
  * @param {Function} [options.onProgress] - Callback (phase: 'rendering'|'sharing'|'downloading'|'done'|'error', detail?: any)
- * @returns {Promise<{ blob: Blob, filename: string, method: 'share'|'download' }>}
+ * @returns {Promise<{ method: 'share'|'download', filename: string, blob: Blob, shared: boolean, downloaded: boolean }>}
  */
 export async function exportImage(imageSource, watermarkData, options = {}) {
   const opts = options || {};
   const notify = typeof opts.onProgress === 'function' ? opts.onProgress : () => {};
 
   try {
-    notify('rendering');
+    let blob;
+    let filename;
 
-    // 1. Render high-resolution canvas offscreen and produce JPEG blob
-    const blob = await exportFullResolution(imageSource, watermarkData, {
-      orientation: opts.orientation || 1,
-      quality: typeof opts.quality === 'number' ? opts.quality : 0.95,
-      mimeType: 'image/jpeg'
-    });
+    if (typeof watermarkData === 'string') {
+      blob = imageSource;
+      filename = watermarkData || opts.filename || generateExportFilename('', opts.date || new Date());
+    } else {
+      notify('rendering');
 
-    // 2. Generate standardized timestamped filename
-    const filename = opts.filename
-      ? opts.filename
-      : generateExportFilename('', opts.date || new Date());
+      // 1. Render high-resolution canvas offscreen and produce JPEG blob
+      blob = await exportFullResolution(imageSource, watermarkData, {
+        ...opts,
+        orientation: opts.orientation || 1,
+        quality: typeof opts.quality === 'number' ? opts.quality : 0.95,
+        mimeType: 'image/jpeg'
+      });
+
+      // 2. Generate standardized timestamped filename
+      filename = opts.filename
+        ? opts.filename
+        : generateExportFilename('', opts.date || new Date());
+    }
 
     let method = 'download';
 
@@ -233,12 +341,23 @@ export async function exportImage(imageSource, watermarkData, options = {}) {
     }
 
     notify('done', { filename, method });
-    return { blob, filename, method };
+    return {
+      method,
+      filename,
+      blob,
+      shared: method === 'share',
+      downloaded: method === 'download'
+    };
   } catch (err) {
     notify('error', err);
     throw err;
   }
 }
+
+/**
+ * Alias for exportImage that exports full-resolution image and delivers via Web Share or download.
+ */
+export const exportAndDeliver = exportImage;
 
 /**
  * Backward-compatible alias for exportImage matching test suites.
@@ -258,7 +377,16 @@ export class ExportManager {
   static download(blob, filename) {
     return downloadBlob(blob, filename);
   }
+  static shareImage(blob, filename, title) {
+    return shareImage(blob, filename, title);
+  }
+  static shareMultipleImages(items, title) {
+    return shareMultipleImages(items, title);
+  }
   static export(image, watermarkData, options) {
     return exportImage(image, watermarkData, options);
+  }
+  static exportAndDeliver(image, watermarkData, options) {
+    return exportAndDeliver(image, watermarkData, options);
   }
 }

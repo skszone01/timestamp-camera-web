@@ -75,6 +75,7 @@ const PROVIDER_LABELS = {
 let el = {};
 let clockInterval = null;
 let copyCoordsTimer = null;
+let popupNotiTimer = null;
 let repaintRequest = null;
 let addressToken = 0;
 let exportBlob = null;
@@ -169,20 +170,82 @@ export function queryDOMElements() {
     shareBtn: $('btn-share'),
     downloadBtn: $('btn-download'),
 
+    popupNoti: $('popup-noti'),
+    popupNotiTitle: $('popup-noti-title'),
+    popupNotiDesc: $('popup-noti-desc'),
+    popupNotiClose: $('popup-noti-close'),
+
     toasts: $('toast-container')
   };
 }
 
 export function showToast(message, duration = 3200) {
-  if (!el.toasts) return;
+  const container = el.toasts || (typeof document !== 'undefined' ? document.getElementById('toast-container') : null);
+  if (!container) return;
   const toast = document.createElement('div');
   toast.className = 'toast';
   toast.textContent = message;
-  el.toasts.appendChild(toast);
+  container.appendChild(toast);
   setTimeout(() => {
     toast.classList.add('is-leaving');
     setTimeout(() => toast.remove(), 300);
   }, duration);
+}
+
+export function closePopupNoti() {
+  if (popupNotiTimer) {
+    clearTimeout(popupNotiTimer);
+    popupNotiTimer = null;
+  }
+  const dialog = el.popupNoti || (typeof document !== 'undefined' ? document.getElementById('popup-noti') : null);
+  if (!dialog) return;
+  try {
+    if (typeof dialog.close === 'function') dialog.close();
+  } catch {
+    // ignore if not open as modal
+  }
+  dialog.removeAttribute('open');
+}
+
+export function showPopupNoti(title, detail = '', durationMs = 2400) {
+  showToast(detail ? `${title} — ${detail}` : title);
+
+  const dialog = el.popupNoti || (typeof document !== 'undefined' ? document.getElementById('popup-noti') : null);
+  const titleNode = el.popupNotiTitle || (typeof document !== 'undefined' ? document.getElementById('popup-noti-title') : null);
+  const descNode = el.popupNotiDesc || (typeof document !== 'undefined' ? document.getElementById('popup-noti-desc') : null);
+
+  if (titleNode) {
+    titleNode.textContent = title;
+  }
+  if (descNode) {
+    descNode.textContent = detail || '';
+    descNode.hidden = !detail;
+  }
+  if (dialog) {
+    if (dialog.open || dialog.hasAttribute('open')) {
+      try { dialog.close(); } catch {}
+      dialog.removeAttribute('open');
+    }
+    if (typeof dialog.showModal === 'function') {
+      try {
+        dialog.showModal();
+      } catch {
+        dialog.setAttribute('open', '');
+      }
+    } else {
+      dialog.setAttribute('open', '');
+    }
+  }
+
+  if (popupNotiTimer) {
+    clearTimeout(popupNotiTimer);
+    popupNotiTimer = null;
+  }
+  if (durationMs > 0) {
+    popupNotiTimer = setTimeout(() => {
+      closePopupNoti();
+    }, durationMs);
+  }
 }
 
 function setTag(node, text, tone = '') {
@@ -614,7 +677,7 @@ export async function copyCoordinates() {
   }
 
   await copyTextToClipboard(text);
-  showToast(`คัดลอกพิกัดแล้ว: ${text}`);
+  showPopupNoti('คัดลอกพิกัดสำเร็จ', text);
 
   if (el.btnCopyCoordsLabel && !el.btnCopyCoordsLabel.dataset.defaultLabel && !el.btnCopyCoords?.classList.contains('is-copied')) {
     el.btnCopyCoordsLabel.dataset.defaultLabel = el.btnCopyCoordsLabel.textContent || 'คัดลอกพิกัด';
@@ -1383,7 +1446,7 @@ function cleanupBatchExportUrls() {
   batchExportResults = [];
 }
 
-async function runExport() {
+export async function runExport() {
   const state = getState();
   if (!state.image) {
     el.fileInput?.click();
@@ -1452,6 +1515,9 @@ async function runExport() {
           dl.href = res.url;
           dl.download = res.filename;
           dl.textContent = 'ดาวน์โหลด';
+          dl.addEventListener('click', () => {
+            showPopupNoti('บันทึกภาพลงเครื่องแล้ว', `ดาวน์โหลดภาพที่ ${idx + 1} เรียบร้อยแล้ว`);
+          });
 
           cap.append(label, dl);
           card.append(img, cap);
@@ -1478,6 +1544,7 @@ async function runExport() {
       }
 
       openSheet(el.resultSheet);
+      showPopupNoti(`ประมวลผลครบ ${batchExportResults.length} ภาพแล้ว`, 'กด "แชร์ / บันทึกทั้งหมด" หรือ "ดาวน์โหลดทั้งหมด" ได้เลย');
       return;
     }
 
@@ -1519,6 +1586,7 @@ async function runExport() {
         : 'กด "ดาวน์โหลดไฟล์" เพื่อบันทึกภาพ';
     }
     openSheet(el.resultSheet);
+    showPopupNoti('สร้างภาพพร้อมบันทึกแล้ว', 'กด "แชร์ / บันทึกลงอัลบั้ม" หรือ "ดาวน์โหลดไฟล์" ได้เลย');
   } catch (err) {
     console.error('[App] Export failed:', err);
     showToast('สร้างภาพไม่สำเร็จ: ' + (err?.message || err), 5000);
@@ -1545,18 +1613,83 @@ function getInAppSaveHint(appName, shareable) {
   return `เบราว์เซอร์ของ ${appName} ดาวน์โหลดไฟล์ไม่ได้ — ${first}กดค้างที่รูปแล้วเลือก "บันทึกรูปภาพ" · ถ้ายังไม่ได้ ${openOutside} แล้วทำใหม่`;
 }
 
-async function shareExport() {
+async function invokeShareWithStatus(fileOrFiles, title) {
+  let aborted = false;
+  const nav = typeof navigator !== 'undefined' ? navigator : null;
+  const origShare = nav && typeof nav.share === 'function' ? nav.share : null;
+
+  if (nav && origShare) {
+    try {
+      nav.share = async function (...args) {
+        try {
+          return await origShare.apply(this, args);
+        } catch (err) {
+          if (err && err.name === 'AbortError') {
+            aborted = true;
+          }
+          throw err;
+        }
+      };
+    } catch {
+      // ignore if navigator.share is non-writable
+    }
+  }
+
+  try {
+    const res = await shareFile(fileOrFiles, title);
+    if (aborted || (res && typeof res === 'object' && res.cancelled)) {
+      return { shared: false, cancelled: true, downloaded: false };
+    }
+    if (res && typeof res === 'object') {
+      return res;
+    }
+    if (res === true) {
+      return { shared: true, cancelled: false, downloaded: false };
+    }
+    return { shared: false, cancelled: false, downloaded: false };
+  } catch (err) {
+    if (err && err.name === 'AbortError') {
+      return { shared: false, cancelled: true, downloaded: false };
+    }
+    throw err;
+  } finally {
+    if (nav && origShare && nav.share !== origShare) {
+      try { nav.share = origShare; } catch {}
+    }
+  }
+}
+
+export async function shareExport() {
   if (batchExportResults.length > 1) {
     const files = batchExportResults.map(r => r.file);
     try {
       if (canUseWebShare(files)) {
-        await shareFile(files, `Timestamp Photos (${files.length})`);
+        const res = await invokeShareWithStatus(files, `Timestamp Photos (${files.length})`);
+        if (res && res.cancelled) return;
+        if (res && res.shared) {
+          showPopupNoti('แชร์ / บันทึกภาพสำเร็จ', `แชร์ภาพทั้งหมด ${batchExportResults.length} ภาพเรียบร้อยแล้ว`);
+          return;
+        }
+      } else if (canUseWebShare(files[0])) {
+        // Fallback if browser only supports single-file share
+        let sharedCount = 0;
+        for (const item of batchExportResults) {
+          const r = await invokeShareWithStatus(item.file, item.filename);
+          if (r && r.cancelled) return;
+          if (r && r.shared) sharedCount++;
+        }
+        if (sharedCount > 0) {
+          showPopupNoti('แชร์ / บันทึกภาพสำเร็จ', `แชร์ภาพทั้งหมด ${batchExportResults.length} ภาพเรียบร้อยแล้ว`);
+          return;
+        }
+      }
+      const inApp = getInAppBrowserName();
+      if (inApp) {
+        showToast(getInAppSaveHint(inApp, false), 8000);
         return;
       }
-      // Fallback if browser only supports single-file share
-      for (const res of batchExportResults) {
-        await shareFile(res.file, res.filename);
-      }
+      downloadAllBatchResults(false);
+      showPopupNoti('บันทึกภาพลงเครื่องแล้ว', 'ดาวน์โหลดไฟล์ภาพลงเครื่องเรียบร้อยแล้ว');
       return;
     } catch (err) {
       const inApp = getInAppBrowserName();
@@ -1564,7 +1697,8 @@ async function shareExport() {
         showToast(getInAppSaveHint(inApp, false), 8000);
         return;
       }
-      downloadAllBatchResults();
+      downloadAllBatchResults(false);
+      showPopupNoti('บันทึกภาพลงเครื่องแล้ว', 'ดาวน์โหลดไฟล์ภาพลงเครื่องเรียบร้อยแล้ว');
       return;
     }
   }
@@ -1572,7 +1706,19 @@ async function shareExport() {
   if (!exportBlob) return;
   const file = new File([exportBlob], exportFilename, { type: 'image/jpeg' });
   try {
-    await shareFile(file, exportFilename);
+    const res = await invokeShareWithStatus(file, exportFilename);
+    if (res && res.cancelled) return;
+    if (res && res.shared) {
+      showPopupNoti('แชร์ / บันทึกภาพสำเร็จ', 'แชร์หรือบันทึกภาพลงเครื่องเรียบร้อยแล้ว');
+      return;
+    }
+    const inApp = getInAppBrowserName();
+    if (inApp) {
+      showToast(getInAppSaveHint(inApp, false), 8000);
+      return;
+    }
+    downloadBlob(exportBlob, exportFilename);
+    showPopupNoti('บันทึกภาพลงเครื่องแล้ว', 'ดาวน์โหลดไฟล์ภาพลงเครื่องเรียบร้อยแล้ว');
   } catch (err) {
     const inApp = getInAppBrowserName();
     if (inApp) {
@@ -1582,16 +1728,22 @@ async function shareExport() {
     }
     console.warn('[App] Share failed, downloading instead:', err);
     downloadBlob(exportBlob, exportFilename);
+    showPopupNoti('บันทึกภาพลงเครื่องแล้ว', 'ดาวน์โหลดไฟล์ภาพลงเครื่องเรียบร้อยแล้ว');
   }
 }
 
-function downloadAllBatchResults() {
+export { runExport as handleExport, shareExport as handleShare };
+
+function downloadAllBatchResults(notify = true) {
   if (!batchExportResults.length) return;
   batchExportResults.forEach((res, idx) => {
     setTimeout(() => {
       downloadBlob(res.blob, res.filename);
     }, idx * 220);
   });
+  if (notify) {
+    showPopupNoti(`บันทึกครบ ${batchExportResults.length} ภาพแล้ว`, 'ดาวน์โหลดไฟล์ภาพลงเครื่องเรียบร้อยแล้ว');
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1725,7 +1877,17 @@ export function setupEventListeners() {
   el.downloadBtn?.addEventListener('click', (e) => {
     if (batchExportResults.length > 1) {
       e.preventDefault();
-      downloadAllBatchResults();
+      downloadAllBatchResults(true);
+      return;
+    }
+    showPopupNoti('บันทึกภาพลงเครื่องแล้ว', 'เริ่มดาวน์โหลดไฟล์ภาพเรียบร้อยแล้ว');
+  });
+
+  // Popup notification: close button + tap on backdrop / outside card
+  el.popupNotiClose?.addEventListener('click', () => closePopupNoti());
+  el.popupNoti?.addEventListener('click', (e) => {
+    if (e.target === el.popupNoti || (typeof e.target?.closest === 'function' && !e.target.closest('.popup-noti-card'))) {
+      closePopupNoti();
     }
   });
 
